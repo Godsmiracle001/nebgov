@@ -1054,6 +1054,10 @@ export class GovernorClient {
       .result?.retval;
     if (!raw) throw new Error("No return value");
 
+    const quorum = BigInt(scValToNative(raw));
+    return quorum;
+  }
+
   /**
    * Check if a proposal has reached quorum.
    * Returns true if the sum of for and abstain votes meets or exceeds the required quorum.
