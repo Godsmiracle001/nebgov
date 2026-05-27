@@ -174,8 +174,10 @@ fn test_flow_5_quadratic_voting() {
 
     let timelock_id = env.register(TimelockContract, ());
     let governor_id = env.register(GovernorContract, ());
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
 
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
     governor_client.initialize(
         &admin,
         &wrapper_id,
