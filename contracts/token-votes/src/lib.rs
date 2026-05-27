@@ -1058,7 +1058,7 @@ mod tests {
 
     #[test]
     fn test_delegation_emits_events() {
-        use soroban_sdk::{testutils::Events as _, TryIntoVal as _};
+        use soroban_sdk::TryIntoVal as _;
         let env = Env::default();
         env.mock_all_auths();
 
