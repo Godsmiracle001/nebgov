@@ -432,16 +432,10 @@ impl GovernorContract {
         if voting_period == 0 {
             env.panic_with_error(GovernorError::VotePeriodTooShort);
         }
-        let timelock_client = TimelockClient::new(&env, &timelock);
-        let execution_window = timelock_client.execution_window();
-        if execution_window == 0 {
-            env.panic_with_error(GovernorError::ExecutionWindowZero);
-        }
-        // timelock_delay + execution_window must not overflow u64
-        let _ = timelock_client
-            .min_delay()
-            .checked_add(execution_window)
-            .unwrap_or_else(|| env.panic_with_error(GovernorError::ArithmeticOverflow));
+        // Do not call the timelock contract during initialize; the timelock
+        // contract instance may not be initialized yet which would cause a
+        // Storage(MissingValue) panic. Defer timelock validation to runtime
+        // operations that require it (e.g., queue/execute).
 
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
