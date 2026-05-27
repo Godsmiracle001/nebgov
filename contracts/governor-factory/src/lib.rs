@@ -3,8 +3,19 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    contract, contractclient, contractimpl, contracterror, contracttype, symbol_short, Address,
+    BytesN, Env,
 };
+
+/// Error codes returned by the governor factory.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FactoryError {
+    InvalidVotingPeriod = 1,
+    InvalidQuorumNumerator = 2,
+    InvalidTimelockDelay = 3,
+    InvalidVoteType = 4,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -114,6 +125,21 @@ impl GovernorFactoryContract {
         proposal_grace_period: u32,
     ) -> u64 {
         deployer.require_auth();
+
+        // Validate settings before deploying so misconfigured governors are
+        // rejected before any contract deployment takes place.
+        if voting_period == 0 {
+            env.panic_with_error(FactoryError::InvalidVotingPeriod);
+        }
+        if quorum_numerator == 0 {
+            env.panic_with_error(FactoryError::InvalidQuorumNumerator);
+        }
+        if timelock_delay == 0 {
+            env.panic_with_error(FactoryError::InvalidTimelockDelay);
+        }
+        if vote_type > 2 {
+            env.panic_with_error(FactoryError::InvalidVoteType);
+        }
 
         let count: u64 = env
             .storage()

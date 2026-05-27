@@ -870,6 +870,15 @@ impl GovernorContract {
 
         let mut proposal = Self::must_get_proposal(&env, proposal_id);
 
+        // Independently re-verify quorum and threshold against the final vote
+        // tally so that stale cached state cannot allow a failed proposal through.
+        let required_quorum = Self::quorum(env.clone(), proposal_id);
+        let quorum_met = proposal.votes_for + proposal.votes_abstain >= required_quorum;
+        let for_wins = proposal.votes_for > proposal.votes_against;
+        if !quorum_met || !for_wins {
+            env.panic_with_error(GovernorError::ProposalNotSucceeded);
+        }
+
         let timelock_addr: Address = env
             .storage()
             .instance()

@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Symbol,
 };
 
 #[cfg(test)]
@@ -183,7 +183,7 @@ impl TokenVotesContract {
             .set(&DataKey::DelegatorRecord(delegator.clone()), &new_record);
 
         env.events().publish(
-            (symbol_short!("del_chsh"), delegator.clone()),
+            (Symbol::new(env, "DelegateChanged"), delegator.clone()),
             (previous_delegate, delegatee),
         );
     }
@@ -1058,6 +1058,7 @@ mod tests {
 
     #[test]
     fn test_delegation_emits_events() {
+        use soroban_sdk::{testutils::Events as _, TryIntoVal as _};
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1074,13 +1075,18 @@ mod tests {
         client.delegate(&delegator, &delegatee);
 
         let events = env.events().all();
-        // Index 0: Mint
-        // Index 1: Update total supply (v_active event might be used if I changed it, wait)
-        // Actually, my current update_account_votes emits "v_active"
-        // and delegate emits "del_chsh"
+        let sub_events: soroban_sdk::Vec<_> =
+            events.iter().filter(|e| e.0 == contract_id).collect();
+        assert!(sub_events.len() >= 2);
 
-        let sub_events = events.iter().filter(|e| e.0 == contract_id);
-        assert!(sub_events.count() >= 2);
+        // The last contract event must be the canonical DelegateChanged event
+        // with the delegator as the second topic element (issue #460).
+        let delegate_changed = sub_events.last().unwrap();
+        let topic_0: Result<Symbol, _> = delegate_changed.1.get(0).unwrap().try_into_val(&env);
+        assert!(topic_0.is_ok());
+        assert_eq!(topic_0.unwrap(), Symbol::new(&env, "DelegateChanged"));
+        let topic_1: Result<Address, _> = delegate_changed.1.get(1).unwrap().try_into_val(&env);
+        assert_eq!(topic_1.unwrap(), delegator);
     }
 
     #[test]

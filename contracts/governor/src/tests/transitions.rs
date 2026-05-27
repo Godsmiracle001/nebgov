@@ -436,3 +436,45 @@ fn test_execute_batch_executes_all_in_order() {
     assert_eq!(client.state(&proposal_1), ProposalState::Executed);
     assert_eq!(client.state(&proposal_2), ProposalState::Executed);
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+/// Verifies that queue() independently re-checks quorum so a defeated proposal
+/// (votes_for == 0) cannot be queued even if the state machine were bypassed.
+/// Issue #461: queue() must independently verify quorum and threshold.
+fn test_queue_rejects_proposal_failing_quorum() {
+    let (env, client, admin, proposer, _voter) = setup();
+    let proposal_id = make_proposal(&env, &client, &proposer);
+
+    // Register a real timelock so queue() can proceed to the vote-tally check.
+    let timelock_id = env.register(sorogov_timelock::TimelockContract, ());
+    let timelock_client = sorogov_timelock::TimelockContractClient::new(&env, &timelock_id);
+    timelock_client.initialize(&admin, &client.address, &0u64, &1_209_600u64);
+
+    let votes_token_id = env.register(MockVotesContract, ());
+    let guardian = Address::generate(&env);
+    // quorum_numerator = 10 means 10% of 10_000_000 = 1_000_000 required.
+    // No votes cast → votes_for = 0 < 1_000_000 quorum.
+    client.initialize(
+        &admin,
+        &votes_token_id,
+        &timelock_id,
+        &10,
+        &100,
+        &10,
+        &0,
+        &guardian,
+        &VoteType::Extended,
+        &120_960,
+    );
+
+    // Advance past end_ledger without any For votes.
+    env.ledger().set_sequence_number(111);
+
+    // state() should return Defeated since quorum is not met.
+    assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+
+    // queue() must panic with ProposalNotSucceeded (#14) because the
+    // independent quorum re-check also fails.
+    client.queue(&proposal_id);
+}

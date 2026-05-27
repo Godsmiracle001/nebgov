@@ -15,6 +15,7 @@ const TOPIC_MAP: Record<string, string> = {
   queued: "ProposalQueued",
   executed: "ProposalExecuted",
   delegate: "DelegateChanged",
+  del_chsh: "DelegateChanged",
   config_updated: "ConfigUpdated",
   upgraded: "GovernorUpgraded",
   // New-form (already canonical — identity mappings keep the map exhaustive)
