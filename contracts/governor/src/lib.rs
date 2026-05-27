@@ -381,7 +381,7 @@ impl GovernorContract {
         // Extend the TTL for the proposal storage entry
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers);
+            .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers, ttl_ledgers);
     }
 
     fn decode_calldata_args(env: &Env, data: &Bytes) -> Vec<Val> {
