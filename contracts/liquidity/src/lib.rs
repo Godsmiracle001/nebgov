@@ -187,6 +187,10 @@ impl LiquidityContract {
             panic!("amount_in must be positive");
         }
 
+        if outcome_in == outcome_out {
+            panic!("outcome_in and outcome_out must differ");
+        }
+
         let pool_key = Self::pool_key(outcome_in, outcome_out);
         let mut pool: Pool = env
             .storage()
