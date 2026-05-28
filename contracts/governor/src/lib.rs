@@ -1,5 +1,6 @@
 #![no_std]
 #![allow(clippy::too_many_arguments)]
+#![deny(clippy::todo)]
 // Prevent future introduction of dead match patterns in this security-critical
 // state machine (issue #439).
 #![deny(unreachable_patterns)]
@@ -47,6 +48,7 @@ pub enum GovernorError {
     VotePeriodTooShort = 28,
     ExecutionWindowZero = 29,
     TooManyCalldataEntries = 30,
+    VotingEnded = 31,
 }
 
 /// Cross-contract interface for the Timelock contract.
@@ -1175,7 +1177,6 @@ impl GovernorContract {
     }
 
     /// Cancel a proposal. Only proposer or admin can cancel.
-    /// TODO issue #7: enforce cancellation rules, emit event.
     pub fn cancel(env: Env, caller: Address, proposal_id: u64) {
         caller.require_auth();
 
@@ -1329,7 +1330,7 @@ impl GovernorContract {
             timelock.cancel(&gov_addr, &op_id);
         }
 
-        // Emit ProposalCancelledFromQueue event (TODO: add helper for veto event)
+        // Emit ProposalCancelledFromQueue event; a helper may be added later.
         env.events().publish(
             (Symbol::new(&env, "ProposalCancelled"), caller.clone()),
             (proposal_id, queue_time, current_ledger),
@@ -2122,8 +2123,8 @@ impl GovernorContract {
     /// values and implement the migration logic here.
     pub fn migrate(env: Env, _data: MigrateData) {
         env.current_contract_address().require_auth();
-        // TODO: implement storage migration logic when a breaking storage
-        // change is introduced in a future upgrade.
+        // Storage migration is intentionally a no-op until a breaking storage
+        // layout change is introduced in a future upgrade.
     }
 
     // ============================================================================
