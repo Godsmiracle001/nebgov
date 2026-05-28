@@ -335,7 +335,8 @@ export function createApp(server: SorobanRpc.Server): express.Application {
           };
         });
         res.json(data);
-      } catch {
+      } catch (error) {
+        console.error("Profile lookup error:", error);
         res.status(500).json({ error: "Internal server error" });
       }
     },
