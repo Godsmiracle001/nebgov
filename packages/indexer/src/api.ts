@@ -121,6 +121,10 @@ const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5; // Stellar ledgers close approximat
 const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
 const INVALID_ADDRESS_ERROR = "Invalid Stellar address";
 
+function isValidStellarPublicKey(address: string): boolean {
+  return STELLAR_PUBLIC_KEY_REGEX.test(address);
+}
+
 interface HealthResponse {
   status: "ok" | "degraded";
   last_indexed_ledger: number;
