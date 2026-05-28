@@ -118,6 +118,8 @@ const TTL = {
 
 const HEALTH_LAG_THRESHOLD = Number(process.env.HEALTH_LAG_THRESHOLD ?? 100);
 const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5; // Stellar ledgers close approximately every 5 seconds
+const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
+const INVALID_ADDRESS_ERROR = "Invalid Stellar address";
 
 interface HealthResponse {
   status: "ok" | "degraded";
