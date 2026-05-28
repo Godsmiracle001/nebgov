@@ -270,6 +270,8 @@ export default function TreasuryPage() {
       setLoading(false);
       return;
     }
+    setOwnerOnChain(null);
+    setOwnerCheckComplete(false);
     refreshAll();
   }, [readViewer, refreshAll, treasuryClient]);
 
