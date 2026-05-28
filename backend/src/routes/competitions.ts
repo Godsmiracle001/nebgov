@@ -10,6 +10,17 @@ import { logger } from "../logger";
 
 const router = Router();
 
+type PostgresError = Error & { code?: string };
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as PostgresError).code === "23505"
+  );
+}
+
 // Zod schemas for validation
 const listCompetitionsSchema = z.object({
   is_active: z.enum(["true", "false"]).transform(v => v === "true").optional(),
