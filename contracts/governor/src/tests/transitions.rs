@@ -27,6 +27,20 @@ impl MockVotesContract {
     }
 }
 
+#[contract]
+pub struct MockTimelockContract;
+
+#[contractimpl]
+impl MockTimelockContract {
+    pub fn min_delay(_env: Env) -> u64 {
+        1
+    }
+
+    pub fn execution_window(_env: Env) -> u64 {
+        60
+    }
+}
+
 /// Shared helper: initialize the governor with standard test parameters.
 fn setup() -> (
     Env,
@@ -42,7 +56,7 @@ fn setup() -> (
 
     let admin = Address::generate(&env);
     let votes_token_id = env.register(MockVotesContract, ());
-    let timelock = Address::generate(&env);
+    let timelock = env.register(MockTimelockContract, ());
     let proposer = Address::generate(&env);
     let voter = Address::generate(&env);
 
@@ -184,6 +198,17 @@ fn test_defeated_when_against_wins() {
 
     env.ledger().set_sequence_number(111); // Past end
     assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+/// Verifies that cast_vote rejects votes submitted after the voting period has ended.
+fn test_cast_vote_rejects_after_voting_period_end() {
+    let (env, client, _, proposer, voter) = setup();
+    let proposal_id = make_proposal(&env, &client, &proposer);
+
+    env.ledger().set_sequence_number(111); // Past end_ledger (10 + 100)
+    client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
 }
 
 #[test]
@@ -433,29 +458,64 @@ fn test_execute_batch_executes_all_in_order() {
 
     let timelock_id = env.register(sorogov_timelock::TimelockContract, ());
     let timelock_client = sorogov_timelock::TimelockContractClient::new(&env, &timelock_id);
-    timelock_client.initialize(&admin, &client.address, &0);
+    timelock_client.initialize(&admin, &client.address, &0u64, &1_209_600u64);
 
-    let votes_token = Address::generate(&env);
-    client.initialize(&admin, &votes_token, &timelock_id, &10, &100, &0, &0);
+    let votes_token_id = env.register(MockVotesContract, ());
+    let guardian = Address::generate(&env);
+    client.initialize(
+        &admin,
+        &votes_token_id,
+        &timelock_id,
+        &10,
+        &100,
+        &0,
+        &0,
+        &guardian,
+        &VoteType::Extended,
+        &120_960,
+    );
 
     let dummy_id = env.register(LocalDummyContract, ());
     let fn_name = Symbol::new(&env, "noop");
     let description_1 = String::from_str(&env, "batch-1");
     let description_2 = String::from_str(&env, "batch-2");
+    let description_hash_1 = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"batch-1"))
+        .into();
+    let description_hash_2 = env
+        .crypto()
+        .sha256(&Bytes::from_slice(&env, b"batch-2"))
+        .into();
+    let metadata_uri_1 = String::from_str(&env, "https://example.com/batch-1");
+    let metadata_uri_2 = String::from_str(&env, "https://example.com/batch-2");
+
+    let mut targets = soroban_sdk::Vec::new(&env);
+    targets.push_back(dummy_id.clone());
+    let mut fn_names = soroban_sdk::Vec::new(&env);
+    fn_names.push_back(fn_name.clone());
+    let mut calldatas_1 = soroban_sdk::Vec::new(&env);
+    calldatas_1.push_back(Bytes::new(&env));
+    let mut calldatas_2 = soroban_sdk::Vec::new(&env);
+    calldatas_2.push_back(Bytes::from_array(&env, &[7u8]));
 
     let proposal_1 = client.propose(
         &proposer,
         &description_1,
-        &dummy_id,
-        &fn_name,
-        &Bytes::new(&env),
+        &description_hash_1,
+        &metadata_uri_1,
+        &targets,
+        &fn_names,
+        &calldatas_1,
     );
     let proposal_2 = client.propose(
         &proposer,
         &description_2,
-        &dummy_id,
-        &fn_name,
-        &Bytes::from_array(&env, &[7u8]),
+        &description_hash_2,
+        &metadata_uri_2,
+        &targets,
+        &fn_names,
+        &calldatas_2,
     );
 
     env.ledger().set_sequence_number(10);
@@ -477,4 +537,46 @@ fn test_execute_batch_executes_all_in_order() {
     client.execute_batch(&batch);
     assert_eq!(client.state(&proposal_1), ProposalState::Executed);
     assert_eq!(client.state(&proposal_2), ProposalState::Executed);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+/// Verifies that queue() independently re-checks quorum so a defeated proposal
+/// (votes_for == 0) cannot be queued even if the state machine were bypassed.
+/// Issue #461: queue() must independently verify quorum and threshold.
+fn test_queue_rejects_proposal_failing_quorum() {
+    let (env, client, admin, proposer, _voter) = setup();
+    let proposal_id = make_proposal(&env, &client, &proposer);
+
+    // Register a real timelock so queue() can proceed to the vote-tally check.
+    let timelock_id = env.register(sorogov_timelock::TimelockContract, ());
+    let timelock_client = sorogov_timelock::TimelockContractClient::new(&env, &timelock_id);
+    timelock_client.initialize(&admin, &client.address, &0u64, &1_209_600u64);
+
+    let votes_token_id = env.register(MockVotesContract, ());
+    let guardian = Address::generate(&env);
+    // quorum_numerator = 10 means 10% of 10_000_000 = 1_000_000 required.
+    // No votes cast → votes_for = 0 < 1_000_000 quorum.
+    client.initialize(
+        &admin,
+        &votes_token_id,
+        &timelock_id,
+        &10,
+        &100,
+        &10,
+        &0,
+        &guardian,
+        &VoteType::Extended,
+        &120_960,
+    );
+
+    // Advance past end_ledger without any For votes.
+    env.ledger().set_sequence_number(111);
+
+    // state() should return Defeated since quorum is not met.
+    assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+
+    // queue() must panic with ProposalNotSucceeded (#14) because the
+    // independent quorum re-check also fails.
+    client.queue(&proposal_id);
 }

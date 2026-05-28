@@ -75,6 +75,8 @@ test.describe("Create Proposal", () => {
   test("displays proposal form", async ({ page }) => {
     await page.goto("/propose");
     await expect(page.locator("h1, h2")).toContainText(/Create|Proposal/i);
+    await expect(page.locator('[placeholder*="title" i]')).toBeVisible();
+    await expect(page.locator('[placeholder*="description" i]')).toBeVisible();
   });
 });
 
@@ -86,9 +88,30 @@ test.describe("Full Proposal Lifecycle (mocked wallet)", () => {
     await expect(page).toHaveURL("/propose");
 
     const titleInput = page.locator('[data-testid="proposal-title"], input[name="title"], input[placeholder*="title" i]');
-    if (await titleInput.count() > 0) {
-      await titleInput.fill("Test Proposal");
+    const descriptionInput = page.locator('textarea[name="description"], textarea[placeholder*="description" i]');
+    const metadataInput = page.locator('input[name="metadata_uri"], input[placeholder*="ipfs" i]');
+    const continueButton = page.getByRole("button", { name: /Continue/i }).first();
+
+    if (await titleInput.count() === 0 || await descriptionInput.count() === 0) {
+      await expect(page.locator("text=Propose a new idea").or(page.locator("text=Missing"))).toBeVisible();
+      return;
     }
+
+    await titleInput.fill("Improve governance docs");
+    await descriptionInput.fill("This proposal tests the proposal creation wizard with sample content.");
+    if (await metadataInput.count() > 0) {
+      await metadataInput.fill("ipfs://example-metadata");
+    }
+
+    await continueButton.click();
+    await expect(page.getByRole("button", { name: /Submit Proposal/i })).toBeVisible();
+  });
+
+  test("proposal form includes title and description fields", async ({ page }) => {
+    await mockWalletConnection(page);
+    await page.goto("/propose");
+    await expect(page.locator('[placeholder*="title" i]')).toBeVisible();
+    await expect(page.locator('[placeholder*="description" i]')).toBeVisible();
   });
 
   test("can view delegates and initiate delegation", async ({ page }) => {
@@ -101,5 +124,24 @@ test.describe("Full Proposal Lifecycle (mocked wallet)", () => {
 
     const modal = page.locator('[role="dialog"], .fixed.inset-0');
     await expect(modal).toBeVisible();
+  });
+
+  test("shows vote UI on proposal detail pages", async ({ page }) => {
+    await mockWalletConnection(page);
+    await page.goto("/proposal/1");
+    await page.waitForLoadState("networkidle");
+
+    const voteHeading = page.getByText(/Cast Your Vote/i).first();
+    await expect(voteHeading).toBeVisible();
+    await expect(page.getByRole("button", { name: /Connect Wallet/i }).first()).toBeVisible();
+  });
+
+  test("vote UI in proposal detail shows wallet prompt when not connected", async ({ page }) => {
+    await page.goto("/proposal/1");
+    await page.waitForLoadState("networkidle");
+
+    const voteHeading = page.getByText(/Cast Your Vote/i).first();
+    await expect(voteHeading).toBeVisible();
+    await expect(page.getByText(/Connect your wallet to vote on this proposal/i)).toBeVisible();
   });
 });

@@ -415,10 +415,19 @@ fn test_factory_emits_deployment_event() {
     );
 
     // Verify at least one event was emitted during deployment
-    let events_after = env.events().all().len();
+    let events = env.events().all();
+    let events_after = events.len();
     assert!(
         events_after > events_before,
         "factory should emit events during deployment"
+    );
+
+    let last_event = events.last().expect("expected a deployment event");
+    assert_eq!(last_event.0, factory_id);
+    assert_eq!(
+        last_event.1.len(),
+        5,
+        "deployment event should include id and contract addresses"
     );
 }
 

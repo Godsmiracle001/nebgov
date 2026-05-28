@@ -13,6 +13,7 @@ const DEFAULT_POLL_INTERVAL_MS = 10_000;
 const TOPICS = {
   proposalCreated: "ProposalCreated",
   voteCast: "VoteCast",
+  voteCastWithReason: "VoteCastWithReason",
   proposalQueued: "ProposalQueued",
   proposalExecuted: "ProposalExecuted",
   proposalCancelled: "ProposalCancelled",
@@ -37,6 +38,8 @@ export interface ProposalCreatedEventData {
   proposalId: bigint;
   proposer: string;
   description: string;
+  descriptionHash: string;
+  metadataUri: string;
   targets: unknown[];
   fnNames: unknown[];
   calldatas: unknown[];
@@ -49,6 +52,14 @@ export interface VoteCastEventData {
   voter: string;
   support: number;
   weight: bigint;
+}
+
+export interface VoteCastWithReasonEventData {
+  proposalId: bigint;
+  voter: string;
+  support: number;
+  weight: bigint;
+  reason: string;
 }
 
 export interface ProposalQueuedEventData {
@@ -164,8 +175,7 @@ function toGovernorSettings(value: unknown): GovernorSettings | null {
     votingDelay === null ||
     votingPeriod === null ||
     quorumNumerator === null ||
-    proposalThreshold === null ||
-    proposalGracePeriod === null
+    proposalThreshold === null
   ) {
     return null;
   }
@@ -177,7 +187,7 @@ function toGovernorSettings(value: unknown): GovernorSettings | null {
     proposalThreshold,
     guardian: String(value.guardian ?? ""),
     voteType: VoteType.Extended,
-    proposalGracePeriod,
+    proposalGracePeriod: toNumber(value.proposal_grace_period) ?? 0,
     useDynamicQuorum: Boolean(value.use_dynamic_quorum),
     reflectorOracle:
       value.reflector_oracle === undefined || value.reflector_oracle === null
@@ -315,6 +325,8 @@ export function parseProposalCreatedEvent(
       proposalId,
       proposer: String(event.topic[1]),
       description: String(event.value[1] ?? ""),
+      descriptionHash: "",
+      metadataUri: "",
       targets: Array.isArray(event.value[2]) ? event.value[2] : [],
       fnNames: Array.isArray(event.value[3]) ? event.value[3] : [],
       calldatas: Array.isArray(event.value[4]) ? event.value[4] : [],
@@ -335,6 +347,8 @@ export function parseProposalCreatedEvent(
     proposalId,
     proposer: String(event.value.proposer ?? ""),
     description: String(event.value.description ?? ""),
+    descriptionHash: String(event.value.description_hash ?? ""),
+    metadataUri: String(event.value.metadata_uri ?? ""),
     targets: Array.isArray(event.value.targets) ? event.value.targets : [],
     fnNames: Array.isArray(event.value.fn_names) ? event.value.fn_names : [],
     calldatas: Array.isArray(event.value.calldatas) ? event.value.calldatas : [],
@@ -375,6 +389,26 @@ export function parseVoteCastEvent(event: SorobanEvent): VoteCastEventData | nul
     voter: String(event.value.voter ?? ""),
     support,
     weight,
+  };
+}
+
+export function parseVoteCastWithReasonEvent(
+  event: SorobanEvent
+): VoteCastWithReasonEventData | null {
+  if (event.topic[0] !== TOPICS.voteCastWithReason || !isRecord(event.value)) return null;
+
+  const proposalId = toBigInt(event.value.proposal_id);
+  const support = toNumber(event.value.support);
+  const weight = toBigInt(event.value.weight);
+
+  if (proposalId === null || support === null || weight === null) return null;
+
+  return {
+    proposalId,
+    voter: String(event.value.voter ?? ""),
+    support,
+    weight,
+    reason: String(event.value.reason ?? ""),
   };
 }
 
@@ -503,6 +537,21 @@ export function subscribeToVotes(
   );
 }
 
+export function subscribeToVoteCastWithReason(
+  governorAddress: string,
+  proposalId: bigint,
+  callback: (event: SorobanEvent) => void,
+  opts: SubscriptionOptions
+): () => void {
+  return createTopicSubscription(
+    governorAddress,
+    TOPICS.voteCastWithReason,
+    callback,
+    opts,
+    (event) => parseVoteCastWithReasonEvent(event)?.proposalId === proposalId
+  );
+}
+
 export async function getProposalEvents(
   governorAddress: string,
   fromLedger: number,
@@ -595,9 +644,14 @@ export function parsePauseEvent(event: SorobanEvent): PauseEventData | null {
 
   // The pauser address is the second topic segment when present; fall back to
   // the value field for completeness.
-  const pauser = event.topic[1] ?? String(event.value.pauser ?? "");
+  const pauser =
+    typeof event.topic[1] === "string"
+      ? event.topic[1]
+      : event.value.pauser === undefined || event.value.pauser === null
+      ? ""
+      : String(event.value.pauser);
 
-  return { pauser: String(pauser), ledger };
+  return { pauser, ledger };
 }
 
 export function parseUnpauseEvent(event: SorobanEvent): UnpauseEventData | null {

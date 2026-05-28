@@ -177,3 +177,145 @@ fn test_second_deploy_has_different_addresses() {
     assert_eq!(e1.id, 1);
     assert_eq!(e2.id, 2);
 }
+
+// ─── settings validation tests (issue #477) ───────────────────────────────────
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_deploy_rejects_zero_voting_period() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    env.register(GovernorContract, ());
+    env.register(TimelockContract, ());
+    env.register(TokenVotesContract, ());
+
+    let (governor_hash, timelock_hash, token_votes_hash) = upload_wasms(&env);
+
+    let admin = Address::generate(&env);
+    let deployer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let factory_id = env.register(GovernorFactoryContract, ());
+    let factory = GovernorFactoryContractClient::new(&env, &factory_id);
+    factory.initialize(&admin, &governor_hash, &timelock_hash, &token_votes_hash);
+
+    let guardian = Address::generate(&env);
+    factory.deploy(
+        &deployer,
+        &token,
+        &100u32,
+        &0u32, // zero voting_period — must be rejected
+        &50u32,
+        &0i128,
+        &3600u64,
+        &guardian,
+        &1u32,
+        &120_960u32,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_deploy_rejects_zero_quorum_numerator() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    env.register(GovernorContract, ());
+    env.register(TimelockContract, ());
+    env.register(TokenVotesContract, ());
+
+    let (governor_hash, timelock_hash, token_votes_hash) = upload_wasms(&env);
+
+    let admin = Address::generate(&env);
+    let deployer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let factory_id = env.register(GovernorFactoryContract, ());
+    let factory = GovernorFactoryContractClient::new(&env, &factory_id);
+    factory.initialize(&admin, &governor_hash, &timelock_hash, &token_votes_hash);
+
+    let guardian = Address::generate(&env);
+    factory.deploy(
+        &deployer,
+        &token,
+        &100u32,
+        &1000u32,
+        &0u32, // zero quorum_numerator — must be rejected
+        &0i128,
+        &3600u64,
+        &guardian,
+        &1u32,
+        &120_960u32,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_deploy_rejects_zero_timelock_delay() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    env.register(GovernorContract, ());
+    env.register(TimelockContract, ());
+    env.register(TokenVotesContract, ());
+
+    let (governor_hash, timelock_hash, token_votes_hash) = upload_wasms(&env);
+
+    let admin = Address::generate(&env);
+    let deployer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let factory_id = env.register(GovernorFactoryContract, ());
+    let factory = GovernorFactoryContractClient::new(&env, &factory_id);
+    factory.initialize(&admin, &governor_hash, &timelock_hash, &token_votes_hash);
+
+    let guardian = Address::generate(&env);
+    factory.deploy(
+        &deployer,
+        &token,
+        &100u32,
+        &1000u32,
+        &50u32,
+        &0i128,
+        &0u64, // zero timelock_delay — must be rejected
+        &guardian,
+        &1u32,
+        &120_960u32,
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_deploy_rejects_invalid_vote_type() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    env.register(GovernorContract, ());
+    env.register(TimelockContract, ());
+    env.register(TokenVotesContract, ());
+
+    let (governor_hash, timelock_hash, token_votes_hash) = upload_wasms(&env);
+
+    let admin = Address::generate(&env);
+    let deployer = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let factory_id = env.register(GovernorFactoryContract, ());
+    let factory = GovernorFactoryContractClient::new(&env, &factory_id);
+    factory.initialize(&admin, &governor_hash, &timelock_hash, &token_votes_hash);
+
+    let guardian = Address::generate(&env);
+    factory.deploy(
+        &deployer,
+        &token,
+        &100u32,
+        &1000u32,
+        &50u32,
+        &0i128,
+        &3600u64,
+        &guardian,
+        &99u32, // invalid vote_type — must be rejected
+        &120_960u32,
+    );
+}

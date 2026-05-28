@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Symbol,
 };
 
 #[cfg(test)]
@@ -33,6 +33,7 @@ pub enum DataKey {
     Nonce(Address),            // owner -> nonce for delegate_by_sig
     CheckpointRetentionPeriod, // u32: number of ledgers to retain checkpoints
     AccountList,               // Vec<Address>: all accounts that have checkpoints
+    IsInAccountList(Address),  // bool: marker for O(1) AccountList membership check
     DelegatorRecord(Address),  // delegator -> DelegatorRecord
     TimeWeightEnabled,         // bool
     TimeWeightScale,           // u32
@@ -53,9 +54,13 @@ impl TokenVotesContract {
             .instance()
             .set(&DataKey::CheckpointRetentionPeriod, &100800u32);
         // Default time-weighting to disabled
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &false);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &false);
         // Default scale to 4,204,800 (~1 year at 7.5s per ledger)
-        env.storage().instance().set(&DataKey::TimeWeightScale, &4204800u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightScale, &4204800u32);
     }
 
     /// Delegate voting power from caller to delegatee.
@@ -154,8 +159,18 @@ impl TokenVotesContract {
 
         if let Some(old_delegatee) = previous_delegate.clone() {
             if old_delegatee != delegatee {
-                Self::update_account_votes(env, old_delegatee.clone(), -record.balance, -old_weighted_sum);
-                Self::update_account_votes(env, delegatee.clone(), new_record.balance, new_weighted_sum);
+                Self::update_account_votes(
+                    env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -old_weighted_sum,
+                );
+                Self::update_account_votes(
+                    env,
+                    delegatee.clone(),
+                    new_record.balance,
+                    new_weighted_sum,
+                );
             } else {
                 let delta = new_record.balance - record.balance;
                 let delta_ws = new_weighted_sum - old_weighted_sum;
@@ -183,7 +198,7 @@ impl TokenVotesContract {
             .set(&DataKey::DelegatorRecord(delegator.clone()), &new_record);
 
         env.events().publish(
-            (symbol_short!("del_chsh"), delegator.clone()),
+            (Symbol::new(env, "DelegateChanged"), delegator.clone()),
             (previous_delegate, delegatee),
         );
     }
@@ -207,7 +222,12 @@ impl TokenVotesContract {
             let weighted_sum = record.balance * record.start_ledger as i128;
             if record.balance > 0 {
                 // Remove voting power from the previous delegate and total supply.
-                Self::update_account_votes(&env, old_delegatee.clone(), -record.balance, -weighted_sum);
+                Self::update_account_votes(
+                    &env,
+                    old_delegatee.clone(),
+                    -record.balance,
+                    -weighted_sum,
+                );
                 Self::update_total_supply_checkpoint(&env, -record.balance, -weighted_sum);
             }
 
@@ -239,7 +259,6 @@ impl TokenVotesContract {
     }
 
     /// Get current voting power of an account.
-    /// TODO issue #8: sum power from all delegators pointing to account.
     pub fn get_votes(env: Env, account: Address) -> i128 {
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
             .storage()
@@ -292,6 +311,12 @@ impl TokenVotesContract {
 
     /// Get voting power at a past ledger sequence (snapshot).
     pub fn get_past_votes(env: Env, account: Address, ledger: u32) -> i128 {
+        let current_ledger = env.ledger().sequence();
+        assert!(
+            ledger <= current_ledger,
+            "ledger must not exceed current ledger"
+        );
+
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
             .storage()
             .persistent()
@@ -334,7 +359,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(&env));
-        
+
         let cp = Self::binary_search(&checkpoints, ledger);
         if cp.votes <= 0 {
             return 0;
@@ -358,7 +383,7 @@ impl TokenVotesContract {
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         let current_ledger = env.ledger().sequence();
-        
+
         // When using raw checkpoint manually, we assume no weighted sum change for simplicity
         // or we try to estimate it based on last checkpoint.
         let weighted_sum = if checkpoints.is_empty() {
@@ -401,7 +426,7 @@ impl TokenVotesContract {
             .persistent()
             .get(&DataKey::TotalCheckpoints)
             .unwrap_or(soroban_sdk::Vec::new(env));
- 
+
         let current_ledger = env.ledger().sequence();
         let (old_votes, old_weighted_sum) = if checkpoints.is_empty() {
             (0, 0)
@@ -411,7 +436,7 @@ impl TokenVotesContract {
         };
         let new_total = old_votes + delta;
         let new_weighted_sum = old_weighted_sum + delta_weighted_sum;
- 
+
         if !checkpoints.is_empty() && checkpoints.last().unwrap().ledger == current_ledger {
             let last_idx = checkpoints.len() - 1;
             checkpoints.set(
@@ -429,7 +454,7 @@ impl TokenVotesContract {
                 weighted_sum: new_weighted_sum,
             });
         }
- 
+
         env.storage()
             .persistent()
             .set(&DataKey::TotalCheckpoints, &checkpoints);
@@ -477,19 +502,25 @@ impl TokenVotesContract {
             .set(&DataKey::Checkpoints(account.clone()), &checkpoints);
 
         // Register account in the global list so prune_checkpoints can find it.
-        // Only add if not already present (linear scan is acceptable since the
-        // list grows slowly and is only read during admin pruning operations).
-        let mut account_list: soroban_sdk::Vec<Address> = env
+        // Uses a persistent marker for O(1) membership check instead of O(N) scan.
+        let already_registered: bool = env
             .storage()
             .persistent()
-            .get(&DataKey::AccountList)
-            .unwrap_or(soroban_sdk::Vec::new(env));
-        let already_registered = account_list.iter().any(|a| a == account);
+            .get(&DataKey::IsInAccountList(account.clone()))
+            .unwrap_or(false);
         if !already_registered {
+            let mut account_list: soroban_sdk::Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::AccountList)
+                .unwrap_or(soroban_sdk::Vec::new(env));
             account_list.push_back(account.clone());
             env.storage()
                 .persistent()
                 .set(&DataKey::AccountList, &account_list);
+            env.storage()
+                .persistent()
+                .set(&DataKey::IsInAccountList(account.clone()), &true);
         }
 
         env.events()
@@ -653,7 +684,9 @@ impl TokenVotesContract {
             .expect("not initialized");
         admin.require_auth();
 
-        env.storage().instance().set(&DataKey::TimeWeightEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeWeightEnabled, &enabled);
     }
 
     /// Get whether time-weighted voting is enabled.
@@ -699,29 +732,35 @@ impl TokenVotesContract {
             return 0;
         }
 
-        let mut new_checkpoints = soroban_sdk::Vec::new(env);
-
-        // Find the first checkpoint to keep (newer than cutoff_ledger)
-        let mut start_idx = checkpoints.len();
-        for i in 0..checkpoints.len() {
-            let checkpoint = checkpoints.get(i).unwrap();
-            if checkpoint.ledger > cutoff_ledger {
-                start_idx = i;
-                break;
+        // Binary search for the first checkpoint with ledger > cutoff_ledger
+        let len = checkpoints.len();
+        let mut low: u32 = 0;
+        let mut high: u32 = len;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let cp = checkpoints.get(mid).unwrap();
+            if cp.ledger <= cutoff_ledger {
+                low = mid + 1;
+            } else {
+                high = mid;
             }
         }
+        let mut start_idx = low;
 
         // Always keep at least the most recent checkpoint
-        if start_idx == checkpoints.len() {
-            start_idx = checkpoints.len() - 1;
+        if start_idx == len {
+            start_idx = len - 1;
         }
 
-        // Copy checkpoints from start_idx to end
-        for i in start_idx..checkpoints.len() {
+        let pruned_count = start_idx.min(len - 1);
+        if pruned_count == 0 {
+            return 0;
+        }
+
+        let mut new_checkpoints = soroban_sdk::Vec::new(env);
+        for i in start_idx..len {
             new_checkpoints.push_back(checkpoints.get(i).unwrap());
         }
-
-        let pruned_count = start_idx.min(checkpoints.len() - 1);
 
         env.storage()
             .persistent()
@@ -758,34 +797,35 @@ impl TokenVotesContract {
                 continue;
             }
 
-            // Find the index of the first checkpoint strictly newer than cutoff.
-            // We keep the checkpoint just before that index so historical queries
-            // at or before cutoff_ledger still return the correct value.
-            let mut keep_from: u32 = 0;
-            for i in 0..checkpoints.len() {
-                let cp = checkpoints.get(i).unwrap();
+            // Binary search for the last checkpoint with ledger <= cutoff_ledger
+            let len = checkpoints.len();
+            let mut low: u32 = 0;
+            let mut high: u32 = len;
+            while low < high {
+                let mid = low + (high - low) / 2;
+                let cp = checkpoints.get(mid).unwrap();
                 if cp.ledger <= cutoff_ledger {
-                    // This checkpoint is a candidate for pruning; the one after
-                    // it (if any) is newer. We track the last one at/before cutoff
-                    // so we can keep it as the "anchor" for historical queries.
-                    keep_from = i;
+                    low = mid + 1;
                 } else {
-                    break;
+                    high = mid;
                 }
             }
+            // low is the index of the first checkpoint > cutoff_ledger
+            // keep_from is the last checkpoint <= cutoff_ledger, or 0 if none
+            let keep_from = if low > 0 { low - 1 } else { 0 };
 
-            // keep_from is the index of the last checkpoint at/before cutoff.
-            // We prune everything before keep_from (exclusive), retaining keep_from
-            // as the historical anchor plus all newer checkpoints.
             if keep_from == 0 {
-                // Either all checkpoints are newer than cutoff, or there is only
-                // one checkpoint at/before cutoff \u2014 nothing to prune.
                 continue;
             }
 
-            let pruned_count = keep_from; // indices 0..keep_from are removed
+            let new_checkpoints_len = len - keep_from;
+            if new_checkpoints_len >= len {
+                continue;
+            }
+
+            let pruned_count = keep_from;
             let mut new_checkpoints = soroban_sdk::Vec::new(env);
-            for i in keep_from..checkpoints.len() {
+            for i in keep_from..len {
                 new_checkpoints.push_back(checkpoints.get(i).unwrap());
             }
 
@@ -1055,6 +1095,7 @@ mod tests {
 
     #[test]
     fn test_delegation_emits_events() {
+        use soroban_sdk::TryIntoVal as _;
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1071,13 +1112,22 @@ mod tests {
         client.delegate(&delegator, &delegatee);
 
         let events = env.events().all();
-        // Index 0: Mint
-        // Index 1: Update total supply (v_active event might be used if I changed it, wait)
-        // Actually, my current update_account_votes emits "v_active"
-        // and delegate emits "del_chsh"
+        let mut sub_events: soroban_sdk::Vec<_> = soroban_sdk::Vec::new(&env);
+        for event in events.iter() {
+            if event.0 == contract_id {
+                sub_events.push_back(event.clone());
+            }
+        }
+        assert!(sub_events.len() >= 2);
 
-        let sub_events = events.iter().filter(|e| e.0 == contract_id);
-        assert!(sub_events.count() >= 2);
+        // The last contract event must be the canonical DelegateChanged event
+        // with the delegator as the second topic element (issue #460).
+        let delegate_changed = sub_events.last().unwrap();
+        let topic_0: Result<Symbol, _> = delegate_changed.1.get(0).unwrap().try_into_val(&env);
+        assert!(topic_0.is_ok());
+        assert_eq!(topic_0.unwrap(), Symbol::new(&env, "DelegateChanged"));
+        let topic_1: Result<Address, _> = delegate_changed.1.get(1).unwrap().try_into_val(&env);
+        assert_eq!(topic_1.unwrap(), delegator);
     }
 
     #[test]
@@ -1126,6 +1176,29 @@ mod tests {
         assert_eq!(client.get_past_votes(&user1, &15), 1500);
         assert_eq!(client.get_past_votes(&user1, &20), 1300);
         assert_eq!(client.get_past_votes(&user1, &100), 1300);
+    }
+
+    #[test]
+    #[should_panic(expected = "ledger must not exceed current ledger")]
+    fn test_get_past_votes_panics_on_future_ledger() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let user1 = Address::generate(&env);
+
+        let (contract_id, token_addr) = setup(&env, &admin);
+        let client = TokenVotesContractClient::new(&env, &contract_id);
+        let sac_client = token::StellarAssetClient::new(&env, &token_addr);
+
+        sac_client.mint(&user1, &1000i128);
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 1;
+        });
+        client.delegate(&user1, &user1);
+
+        let current_ledger = env.ledger().sequence();
+        client.get_past_votes(&user1, &(current_ledger + 1));
     }
 
     // \u2014\u2014 Edge-case tests (issue #192) \u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014\u2014
@@ -1744,7 +1817,6 @@ mod tests {
         assert_eq!(client.get_votes(&delegatee1), 0);
         assert_eq!(client.get_votes(&delegatee2), 300);
     }
-
 }
 
 #[cfg(test)]

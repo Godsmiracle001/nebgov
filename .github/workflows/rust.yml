@@ -10,6 +10,20 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
   test:
     name: Test
     runs-on: ubuntu-latest
@@ -54,7 +68,8 @@ jobs:
             -p sorogov-token-votes \
             -p sorogov-governor-factory \
             -p sorogov-liquidity \
-            -p sorogov-token-votes-wrapper
+            -p sorogov-token-votes-wrapper \
+            -p sorogov-treasury
 
       - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
@@ -91,6 +106,22 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Install System Dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev libudev-dev pkg-config
+
+      - name: Install Stellar CLI
+        run: cargo install --locked stellar-cli
+
+      - name: Build WASMs for test dependencies
+        run: |
+          cargo build --target wasm32v1-none --release \
+            -p sorogov-governor \
+            -p sorogov-timelock \
+            -p sorogov-token-votes \
+            -p sorogov-governor-factory \
+            -p sorogov-treasury \
+            -p sorogov-liquidity
+
       - name: Run clippy
         run: |
           cargo clippy \
@@ -100,8 +131,15 @@ jobs:
             -p sorogov-governor-factory \
             -p sorogov-liquidity \
             -p sorogov-token-votes-wrapper \
+            -p sorogov-treasury \
             --all-targets \
             -- -D warnings
+      - name: Fail on TODO comments in governor contract
+        run: |
+          if grep -RIn --include='*.rs' 'TODO' contracts/governor/src/lib.rs; then
+            echo 'TODO comments found in contracts/governor/src/lib.rs';
+            exit 1;
+          fi
 
   build:
     name: Build WASM

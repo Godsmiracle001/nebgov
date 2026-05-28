@@ -6,8 +6,20 @@ import { validate } from "../middleware/validate";
 import { isAdmin } from "../middleware/admin";
 import { Competition } from "../entities/Competition";
 import { CompetitionParticipant } from "../entities/CompetitionParticipant";
+import { logger } from "../logger";
 
 const router = Router();
+
+type PostgresError = Error & { code?: string };
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as PostgresError).code === "23505"
+  );
+}
 
 // Zod schemas for validation
 const listCompetitionsSchema = z.object({
@@ -145,18 +157,24 @@ router.get(
         offset,
       });
     } catch (error) {
-      console.error("Error fetching competitions:", error);
+      logger.error({ err: error }, "Error fetching competitions");
       res.status(500).json({ error: "Failed to fetch competitions" });
     }
   },
 );
 
-// GET /competitions/:id - Get single competition
+// GET /competitions/:id - Get single competition with user participation state
 router.get(
   "/:id",
+  authenticate,
   validate({ params: getCompetitionSchema }),
   async (req: AuthRequest, res: Response) => {
-    const competitionId = (req.params as any).id;
+    const competitionId = Number((req.params as Record<string, string>).id);
+    const userId = req.userId;
+
+    if (!userId) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
 
     try {
       const result = await pool.query(
@@ -175,17 +193,15 @@ router.get(
       const competition = result.rows[0];
       const response: Record<string, unknown> = { competition };
 
-      if (req.userId) {
-        const participantResult = await pool.query(
-          "SELECT id FROM competition_participants WHERE competition_id = $1 AND user_id = $2",
-          [competitionId, req.userId],
-        );
-        response.is_joined = participantResult.rows.length > 0;
-      }
+      const participantResult = await pool.query(
+        "SELECT id FROM competition_participants WHERE competition_id = $1 AND user_id = $2",
+        [competitionId, userId],
+      );
+      response.is_joined = participantResult.rows.length > 0;
 
       res.json(response);
     } catch (error) {
-      console.error("Error fetching competition:", error);
+      logger.error({ err: error }, "Error fetching competition");
       res.status(500).json({ error: "Failed to fetch competition" });
     }
   },
@@ -238,7 +254,7 @@ router.get(
         offset,
       });
     } catch (error) {
-      console.error("Error fetching participants:", error);
+      logger.error({ err: error }, "Error fetching participants");
       res.status(500).json({ error: "Failed to fetch participants" });
     }
   },
@@ -282,18 +298,6 @@ router.post(
           .json({ error: "Competition has already started" });
       }
 
-      const existingResult = await client.query(
-        "SELECT * FROM competition_participants WHERE competition_id = $1 AND user_id = $2",
-        [competitionId, userId],
-      );
-
-      if (existingResult.rows.length > 0) {
-        await client.query("ROLLBACK");
-        return res
-          .status(400)
-          .json({ error: "Already joined this competition" });
-      }
-
       const insertResult = await client.query<CompetitionParticipant>(
         `INSERT INTO competition_participants (competition_id, user_id, entry_fee_paid)
          VALUES ($1, $2, $3)
@@ -309,7 +313,14 @@ router.post(
       });
     } catch (error) {
       await client.query("ROLLBACK");
-      console.error("Error joining competition:", error);
+      if (isUniqueViolation(error)) {
+        logger.warn(
+          { competitionId: (req.params as any).id, userId: req.userId },
+          "Duplicate competition join prevented by unique constraint",
+        );
+        return res.status(409).json({ error: "Already joined this competition" });
+      }
+      logger.error({ err: error }, "Error joining competition");
       res.status(500).json({ error: "Failed to join competition" });
     } finally {
       client.release();
@@ -377,7 +388,7 @@ router.delete(
       });
     } catch (error) {
       await client.query("ROLLBACK");
-      console.error("Error leaving competition:", error);
+      logger.error({ err: error }, "Error leaving competition");
       res.status(500).json({ error: "Failed to leave competition" });
     } finally {
       client.release();
@@ -405,7 +416,7 @@ router.post(
 
       return res.status(201).json({ competition: result.rows[0] });
     } catch (error) {
-      console.error("Error creating competition:", error);
+      logger.error({ err: error }, "Error creating competition");
       return res.status(500).json({ error: "Failed to create competition" });
     }
   },
@@ -464,7 +475,7 @@ router.put(
 
       return res.status(200).json({ competition: result.rows[0] });
     } catch (error) {
-      console.error("Error updating competition:", error);
+      logger.error({ err: error }, "Error updating competition");
       return res.status(500).json({ error: "Failed to update competition" });
     }
   },
@@ -506,7 +517,7 @@ router.delete(
 
       return res.status(204).send();
     } catch (error) {
-      console.error("Error deleting competition:", error);
+      logger.error({ err: error }, "Error deleting competition");
       return res.status(500).json({ error: "Failed to delete competition" });
     }
   },

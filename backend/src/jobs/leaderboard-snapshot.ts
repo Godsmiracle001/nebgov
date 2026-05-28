@@ -1,4 +1,5 @@
 import pool from "../db/pool";
+import { logger } from "../logger";
 
 const SNAPSHOT_RETENTION_DAYS = Number(process.env.SNAPSHOT_RETENTION_DAYS ?? "90");
 const SNAPSHOT_MIN_DELTA = Number(process.env.SNAPSHOT_MIN_DELTA ?? "0");
@@ -63,10 +64,10 @@ export async function takeLeaderboardSnapshot() {
     }
 
     await client.query("COMMIT");
-    console.log(`✅ Leaderboard snapshot taken for ${today.toISOString()}`);
+    logger.info({ snapshotDate: today.toISOString() }, "Leaderboard snapshot taken");
   } catch (error) {
     await client.query("ROLLBACK");
-    console.error("❌ Failed to take leaderboard snapshot:", error);
+    logger.error({ err: error }, "Failed to take leaderboard snapshot");
     throw error;
   } finally {
     client.release();

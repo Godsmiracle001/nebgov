@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, token, Address, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, Vec,
+};
 
 /// A voting power checkpoint at a specific ledger sequence.
 #[contracttype]
@@ -18,6 +20,7 @@ pub enum DataKey {
     UnderlyingToken,      // SEP-41 token being wrapped
     Admin,
     LockedUntil(Address), // address -> ledger until which withdrawal is locked
+    DepositorBalance(Address), // depositor -> wrapped token balance
 }
 
 #[contract]
@@ -109,6 +112,19 @@ impl TokenVotesWrapperContract {
                 .set(&DataKey::Checkpoints(dst_addr.clone()), &cps);
         }
     }
+
+    fn get_depositor_balance_internal(env: &Env, depositor: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DepositorBalance(depositor))
+            .unwrap_or(0)
+    }
+
+    fn set_depositor_balance(env: &Env, depositor: Address, balance: i128) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::DepositorBalance(depositor), &balance);
+    }
 }
 
 #[contractimpl]
@@ -129,6 +145,21 @@ impl TokenVotesWrapperContract {
             .set(&DataKey::UnderlyingToken, &underlying_token);
     }
 
+    /// Upgrade the contract WASM.
+    /// Only the admin (governor) can call this.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        admin.require_auth();
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        env.events()
+            .publish((symbol_short!("upgrade"),), (new_wasm_hash,));
+    }
+
     /// Deposit `amount` of the underlying SEP-41 token and receive 1:1 wrapped voting tokens.
     /// Automatically self-delegates if the depositor has no delegatee set.
     pub fn deposit(env: Env, from: Address, amount: i128) {
@@ -144,6 +175,9 @@ impl TokenVotesWrapperContract {
         // Transfer underlying tokens from depositor to wrapper contract
         let underlying_client = token::Client::new(&env, &underlying);
         underlying_client.transfer(&from, &env.current_contract_address(), &amount);
+
+        let current_balance = Self::get_depositor_balance_internal(&env, from.clone());
+        Self::set_depositor_balance(&env, from.clone(), current_balance + amount);
 
         // Credit wrapped voting tokens: update delegate's checkpoint
         let delegatee: Address = env
@@ -193,20 +227,9 @@ impl TokenVotesWrapperContract {
             .get(&DataKey::Delegate(from.clone()))
             .unwrap_or(from.clone());
 
-        // Check sufficient wrapped balance (via delegatee checkpoints)
-        let delegatee_cps: Vec<Checkpoint> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Checkpoints(delegatee.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        let current_balance = delegatee_cps
-            .last()
-            .map(|c: Checkpoint| c.votes)
-            .unwrap_or(0);
-        assert!(
-            current_balance >= amount,
-            "insufficient wrapped token balance"
-        );
+        let current_balance = Self::get_depositor_balance_internal(&env, from.clone());
+        assert!(amount <= current_balance, "InsufficientBalance");
+        Self::set_depositor_balance(&env, from.clone(), current_balance - amount);
 
         Self::move_voting_power(&env, Some(&delegatee), None, amount);
 
@@ -245,13 +268,7 @@ impl TokenVotesWrapperContract {
             .get(&DataKey::Delegate(delegator.clone()))
             .unwrap_or(delegator.clone());
 
-        // Get delegator's current wrapped balance (from old delegatee checkpoints)
-        let old_cps: Vec<Checkpoint> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::Checkpoints(old_delegatee.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        let balance = old_cps.last().map(|c: Checkpoint| c.votes).unwrap_or(0);
+        let balance = Self::get_depositor_balance_internal(&env, delegator.clone());
 
         env.storage()
             .persistent()
@@ -280,7 +297,11 @@ impl TokenVotesWrapperContract {
         assert_eq!(caller, admin, "only admin can lock withdrawals");
         env.storage()
             .persistent()
-            .set(&DataKey::LockedUntil(from), &end_ledger);
+            .set(&DataKey::LockedUntil(from.clone()), &end_ledger);
+        env.events().publish(
+            (symbol_short!("lock_wd"),),
+            (from, end_ledger, env.ledger().sequence()),
+        );
     }
 
     // --- VotesTrait compatible methods (for GovernorClient cross-contract calls) ---
@@ -321,6 +342,11 @@ impl TokenVotesWrapperContract {
             .persistent()
             .get(&DataKey::Delegate(account.clone()))
             .unwrap_or(account)
+    }
+
+    /// Get the wrapped balance deposited by an account.
+    pub fn get_depositor_balance(env: Env, account: Address) -> i128 {
+        Self::get_depositor_balance_internal(&env, account)
     }
 
     /// Get the underlying SEP-41 token address.
@@ -408,6 +434,122 @@ mod tests {
         wrapper.delegate(&user, &delegatee);
         assert_eq!(wrapper.get_votes(&delegatee), 500);
         assert_eq!(wrapper.get_votes(&user), 0);
+    }
+
+    #[test]
+    fn test_redelegate_moves_only_depositor_balance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+        let delegatee = Address::generate(&env);
+        let new_delegatee = Address::generate(&env);
+
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_addr = sac.address();
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_client.mint(&user1, &100_i128);
+        token_client.mint(&user2, &900_i128);
+
+        let wrapper_id = env.register(TokenVotesWrapperContract, ());
+        let wrapper = TokenVotesWrapperContractClient::new(&env, &wrapper_id);
+        wrapper.initialize(&admin, &token_addr);
+
+        wrapper.deposit(&user1, &100_i128);
+        wrapper.deposit(&user2, &900_i128);
+        wrapper.delegate(&user1, &delegatee);
+        wrapper.delegate(&user2, &delegatee);
+
+        assert_eq!(wrapper.get_votes(&delegatee), 1000);
+
+        wrapper.delegate(&user1, &new_delegatee);
+
+        assert_eq!(wrapper.get_votes(&delegatee), 900);
+        assert_eq!(wrapper.get_votes(&new_delegatee), 100);
+        assert_eq!(wrapper.get_depositor_balance(&user1), 100);
+        assert_eq!(wrapper.get_depositor_balance(&user2), 900);
+    }
+
+    /// Regression test for issue #392: delegate() must move only the caller's
+    /// deposited balance, never the delegatee's aggregate voting power.
+    #[test]
+    fn test_redelegate_does_not_inflate_voting_power() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        let carol = Address::generate(&env);
+        let dave = Address::generate(&env);
+
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_addr = sac.address();
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_client.mint(&alice, &100_i128);
+        token_client.mint(&bob, &900_i128);
+
+        let wrapper_id = env.register(TokenVotesWrapperContract, ());
+        let wrapper = TokenVotesWrapperContractClient::new(&env, &wrapper_id);
+        wrapper.initialize(&admin, &token_addr);
+
+        // Alice deposits 100, Bob deposits 900, both delegate to Carol.
+        // Carol now has 1000 total power.
+        wrapper.deposit(&alice, &100_i128);
+        wrapper.deposit(&bob, &900_i128);
+        wrapper.delegate(&alice, &carol);
+        wrapper.delegate(&bob, &carol);
+        assert_eq!(wrapper.get_votes(&carol), 1000);
+
+        // Alice redelegates to Dave.  Only Alice's 100 should move.
+        wrapper.delegate(&alice, &dave);
+
+        // Dave must have exactly 100 (Alice's deposit), not 1000.
+        assert_eq!(
+            wrapper.get_votes(&dave),
+            100,
+            "voting power inflation detected"
+        );
+        assert_eq!(
+            wrapper.get_votes(&carol),
+            900,
+            "carol's power should be exactly bob's deposit"
+        );
+
+        // Total voting power must be conserved.
+        assert_eq!(wrapper.get_votes(&dave) + wrapper.get_votes(&carol), 1000);
+    }
+
+    #[test]
+    #[should_panic(expected = "InsufficientBalance")]
+    fn test_withdraw_rejects_overdraw_from_shared_delegatee() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        let sac = env.register_stellar_asset_contract_v2(admin.clone());
+        let token_addr = sac.address();
+        let token_client = soroban_sdk::token::StellarAssetClient::new(&env, &token_addr);
+        token_client.mint(&user1, &100_i128);
+        token_client.mint(&user2, &900_i128);
+
+        let wrapper_id = env.register(TokenVotesWrapperContract, ());
+        let wrapper = TokenVotesWrapperContractClient::new(&env, &wrapper_id);
+        wrapper.initialize(&admin, &token_addr);
+
+        wrapper.deposit(&user1, &100_i128);
+        wrapper.deposit(&user2, &900_i128);
+        wrapper.delegate(&user2, &user1);
+
+        assert_eq!(wrapper.get_votes(&user1), 1000);
+
+        env.ledger().with_mut(|l| l.sequence_number += 1);
+        wrapper.withdraw(&user1, &500_i128);
     }
 
     #[test]

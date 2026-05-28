@@ -3,6 +3,7 @@ import { z } from "zod";
 import pool from "../db/pool";
 import { authenticate, AuthRequest } from "../middleware/auth";
 import { validate } from "../middleware/validate";
+import { logger } from "../logger";
 
 const router = Router();
 
@@ -64,7 +65,7 @@ router.get("/preferences", authenticate, async (req: AuthRequest, res) => {
     );
     res.json(result.rows[0] ?? defaultPreferences());
   } catch (error) {
-    console.error("Error fetching notification preferences:", error);
+    logger.error({ err: error }, "Error fetching notification preferences");
     res.status(500).json({ error: "Failed to fetch preferences" });
   }
 });
@@ -93,7 +94,7 @@ router.post(
 
       res.json(next);
     } catch (error) {
-      console.error("Error saving notification preferences:", error);
+      logger.error({ err: error }, "Error saving notification preferences");
       res.status(500).json({ error: "Failed to save preferences" });
     }
   },
@@ -137,7 +138,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching notification history:", error);
+      logger.error({ err: error }, "Error fetching notification history");
       res.status(500).json({ error: "Failed to fetch notifications" });
     }
   },
@@ -164,7 +165,7 @@ router.post(
       );
       res.status(201).json(inserted.rows[0]);
     } catch (error) {
-      console.error("Error inserting notification:", error);
+      logger.error({ err: error }, "Error inserting notification");
       res.status(500).json({ error: "Failed to create notification" });
     }
   },
@@ -200,7 +201,7 @@ router.post(
       );
       res.json({ unread: unread.rows[0]?.unread ?? 0 });
     } catch (error) {
-      console.error("Error marking notifications read:", error);
+      logger.error({ err: error }, "Error marking notifications read");
       res.status(500).json({ error: "Failed to mark read" });
     }
   },

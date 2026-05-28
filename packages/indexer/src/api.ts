@@ -1,4 +1,4 @@
-import express, { Request, Response } from "express";
+import express, { Request, Response, NextFunction } from "express";
 import { SorobanRpc } from "@stellar/stellar-sdk";
 import { pool } from "./db";
 import { cached, getMetrics } from "./cache";
@@ -6,6 +6,107 @@ import { getLastIndexedLedger } from "./events";
 import { startTime } from "./index";
 import swaggerUi from "swagger-ui-express";
 import { generateOpenApiDocument } from "./openapi";
+
+// ---------------------------------------------------------------------------
+// In-process rate limiter (issue #437)
+//
+// Tracks request counts per IP in a sliding window. No external dependency
+// required — the store is a plain Map that is pruned on every request so
+// memory usage stays bounded.
+// ---------------------------------------------------------------------------
+
+interface RateLimitEntry {
+  count: number;
+  windowStart: number;
+}
+
+const rateLimitStore = new Map<string, RateLimitEntry>();
+
+/**
+ * Build an Express middleware that limits each IP to `max` requests within
+ * a rolling `windowMs` millisecond window.
+ *
+ * When the limit is exceeded the middleware responds with HTTP 429 and a
+ * JSON body that includes a `Retry-After` header (seconds until the window
+ * resets) so well-behaved clients can back off automatically.
+ */
+function createRateLimiter(options: {
+  windowMs: number;
+  max: number;
+  message?: string;
+}) {
+  const { windowMs, max, message = "Too many requests, please try again later." } = options;
+
+  return function rateLimitMiddleware(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): void {
+    const ip =
+      (req.headers["x-forwarded-for"] as string | undefined)?.split(",")[0].trim() ??
+      req.socket.remoteAddress ??
+      "unknown";
+
+    const now = Date.now();
+
+    // Prune stale entries to keep the store from growing unboundedly.
+    for (const [key, entry] of rateLimitStore.entries()) {
+      if (now - entry.windowStart > windowMs) {
+        rateLimitStore.delete(key);
+      }
+    }
+
+    const entry = rateLimitStore.get(ip);
+
+    if (!entry || now - entry.windowStart > windowMs) {
+      // First request in this window (or window has expired).
+      rateLimitStore.set(ip, { count: 1, windowStart: now });
+      res.setHeader("X-RateLimit-Limit", max);
+      res.setHeader("X-RateLimit-Remaining", max - 1);
+      res.setHeader("X-RateLimit-Reset", Math.ceil((now + windowMs) / 1000));
+      next();
+      return;
+    }
+
+    entry.count += 1;
+    const remaining = Math.max(0, max - entry.count);
+    const resetAt = Math.ceil((entry.windowStart + windowMs) / 1000);
+
+    res.setHeader("X-RateLimit-Limit", max);
+    res.setHeader("X-RateLimit-Remaining", remaining);
+    res.setHeader("X-RateLimit-Reset", resetAt);
+
+    if (entry.count > max) {
+      const retryAfter = Math.ceil((entry.windowStart + windowMs - now) / 1000);
+      res.setHeader("Retry-After", retryAfter);
+      res.status(429).json({ error: message });
+      return;
+    }
+
+    next();
+  };
+}
+
+/** General-purpose limiter: 100 requests per 15-minute window per IP. */
+const generalLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100,
+});
+
+/**
+ * Stricter limiter for expensive / enumeration-prone endpoints.
+ *
+ * Applied to:
+ *   - GET /delegates  (N+1 query risk)
+ *   - GET /profile/:address  (enumeration attack surface)
+ *
+ * Allows 30 requests per 15-minute window per IP.
+ */
+const strictLimiter = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  message: "Too many requests to this endpoint, please slow down.",
+});
 
 const TTL = {
   proposals: 30_000, // 30 seconds
@@ -17,6 +118,12 @@ const TTL = {
 
 const HEALTH_LAG_THRESHOLD = Number(process.env.HEALTH_LAG_THRESHOLD ?? 100);
 const STELLAR_LEDGER_CLOSE_TIME_SECONDS = 5; // Stellar ledgers close approximately every 5 seconds
+const STELLAR_PUBLIC_KEY_REGEX = /^G[A-Z2-7]{55}$/;
+const INVALID_ADDRESS_ERROR = "Invalid Stellar address";
+
+function isValidStellarPublicKey(address: string): boolean {
+  return STELLAR_PUBLIC_KEY_REGEX.test(address);
+}
 
 interface HealthResponse {
   status: "ok" | "degraded";
@@ -141,6 +248,11 @@ export function createApp(server: SorobanRpc.Server): express.Application {
   const app = express();
   app.use(express.json());
 
+  // Apply general rate limiting to all routes (issue #437).
+  // Health and docs endpoints are intentionally included so that monitoring
+  // probes cannot be weaponised to exhaust the database connection pool.
+  app.use(generalLimiter);
+
   // Swagger documentation
   app.get("/openapi.json", (_req, res) => {
     res.setHeader("Content-Type", "application/json");
@@ -223,7 +335,8 @@ export function createApp(server: SorobanRpc.Server): express.Application {
           };
         });
         res.json(data);
-      } catch {
+      } catch (error) {
+        console.error("Profile lookup error:", error);
         res.status(500).json({ error: "Internal server error" });
       }
     },
@@ -232,8 +345,9 @@ export function createApp(server: SorobanRpc.Server): express.Application {
   // GET /proposals?offset=0&limit=20 or ?before=47&limit=20 or ?after=10&limit=20
   app.get("/proposals", async (req: Request, res: Response): Promise<void> => {
     const limit = Math.min(Number(req.query.limit ?? 20), 100);
-    const before = req.query.before ? Number(req.query.before) : undefined;
-    const after = req.query.after ? Number(req.query.after) : undefined;
+    // Parse cursor IDs as BigInt to preserve u64 precision.
+    const before = req.query.before ? BigInt(req.query.before as string) : undefined;
+    const after = req.query.after ? BigInt(req.query.after as string) : undefined;
     const offset = Number(req.query.offset ?? 0);
 
     try {
@@ -265,19 +379,23 @@ export function createApp(server: SorobanRpc.Server): express.Application {
         const result = await pool.query(query, params);
         const proposals = result.rows;
 
-        // For cursor pagination, calculate next/prev cursors and hasMore
+        // For cursor pagination, calculate next/prev cursors and hasMore.
+        // Use BigInt to preserve u64 precision when comparing/passing IDs.
         if (before !== undefined || after !== undefined) {
-          let nextCursor: number | undefined;
-          let prevCursor: number | undefined;
+          let nextCursor: string | undefined;
+          let prevCursor: string | undefined;
           let hasMore = false;
 
           if (proposals.length > 0) {
+            const ids = proposals.map((p: { id: string | number }) => BigInt(p.id));
+            const minId = ids.reduce((a: bigint, b: bigint) => (a < b ? a : b));
+            const maxId = ids.reduce((a: bigint, b: bigint) => (a > b ? a : b));
+
             if (before !== undefined) {
               // For "before" queries, next cursor is the smallest ID in results
-              nextCursor = Math.min(...proposals.map(p => p.id));
-              prevCursor = Math.max(...proposals.map(p => p.id));
-              
-              // Check if there are more proposals with smaller IDs
+              nextCursor = minId.toString();
+              prevCursor = maxId.toString();
+
               const hasMoreResult = await pool.query(
                 "SELECT 1 FROM proposals WHERE id < $1 LIMIT 1",
                 [nextCursor]
@@ -286,10 +404,9 @@ export function createApp(server: SorobanRpc.Server): express.Application {
             } else {
               // For "after" queries, reverse the order to match DESC ordering
               proposals.reverse();
-              nextCursor = Math.min(...proposals.map(p => p.id));
-              prevCursor = Math.max(...proposals.map(p => p.id));
-              
-              // Check if there are more proposals with larger IDs
+              nextCursor = minId.toString();
+              prevCursor = maxId.toString();
+
               const hasMoreResult = await pool.query(
                 "SELECT 1 FROM proposals WHERE id > $1 LIMIT 1",
                 [prevCursor]
@@ -298,11 +415,11 @@ export function createApp(server: SorobanRpc.Server): express.Application {
             }
           }
 
-          return { 
-            proposals, 
-            nextCursor, 
-            prevCursor, 
-            hasMore 
+          return {
+            proposals,
+            nextCursor,
+            prevCursor,
+            hasMore
           };
         } else {
           // For offset pagination, return legacy format
@@ -318,16 +435,19 @@ export function createApp(server: SorobanRpc.Server): express.Application {
 
   // GET /proposals/:id
   app.get("/proposals/:id", async (req: Request, res: Response): Promise<void> => {
-    const id = parseInt(req.params.id);
-    
-    // Validate ID is a valid integer
-    if (isNaN(id) || id < 1) {
+    // Use BigInt to preserve full u64 precision — parseInt() silently truncates
+    // values beyond Number.MAX_SAFE_INTEGER (2^53-1), causing wrong lookups.
+    let id: bigint;
+    try {
+      id = BigInt(req.params.id);
+      if (id < 1n) throw new RangeError("non-positive");
+    } catch {
       res.status(400).json({ error: "Invalid proposal ID" });
       return;
     }
 
     try {
-      const result = await pool.query('SELECT * FROM proposals WHERE id = $1', [id]);
+      const result = await pool.query('SELECT * FROM proposals WHERE id = $1', [id.toString()]);
       if (!result.rows[0]) {
         res.status(404).json({ error: 'Proposal not found' });
         return;
@@ -359,24 +479,44 @@ export function createApp(server: SorobanRpc.Server): express.Application {
     },
   );
 
-  // GET /delegates?top=20
-  app.get("/delegates", async (req: Request, res: Response): Promise<void> => {
-    const top = Math.min(Number(req.query.top ?? 20), 100);
-    const key = `delegates:${top}`;
+  // GET /delegates?limit=20&offset=0
+  app.get("/delegates", strictLimiter, async (req: Request, res: Response): Promise<void> => {
+    const limit = Math.min(Number(req.query.limit ?? 20), 100);
+    const offset = Math.max(Number(req.query.offset ?? 0), 0);
+    const key = `delegates:${limit}:${offset}`;
     try {
       const data = await cached(key, TTL.delegates, async () => {
-        const result = await pool.query(
-          `SELECT new_delegatee as address, COUNT(*) as delegator_count
-           FROM delegates d1
-           WHERE ledger = (
-             SELECT MAX(d2.ledger) FROM delegates d2 WHERE d2.delegator = d1.delegator
-           )
-           GROUP BY new_delegatee
-           ORDER BY delegator_count DESC
-           LIMIT $1`,
-          [top],
-        );
-        return { delegates: result.rows };
+        const [countResult, result] = await Promise.all([
+          pool.query(
+            `WITH latest_delegations AS (
+              SELECT DISTINCT ON (delegator) delegator, new_delegatee
+              FROM delegates
+              ORDER BY delegator, ledger DESC
+            )
+            SELECT COUNT(DISTINCT new_delegatee)::int AS total FROM latest_delegations`
+          ),
+          pool.query(
+            `WITH latest_delegations AS (
+              SELECT DISTINCT ON (delegator) delegator, new_delegatee
+              FROM delegates
+              ORDER BY delegator, ledger DESC
+            )
+            SELECT new_delegatee AS address, COUNT(*)::int AS delegator_count
+            FROM latest_delegations
+            GROUP BY new_delegatee
+            ORDER BY delegator_count DESC
+            LIMIT $1 OFFSET $2`,
+            [limit, offset],
+          ),
+        ]);
+        const total = countResult.rows[0]?.total ?? 0;
+        return {
+          delegates: result.rows,
+          total,
+          limit,
+          offset,
+          hasMore: offset + limit < total,
+        };
       });
       res.json(data);
     } catch {
@@ -387,8 +527,16 @@ export function createApp(server: SorobanRpc.Server): express.Application {
   // GET /profile/:address
   app.get(
     "/profile/:address",
+    strictLimiter,
     async (req: Request, res: Response): Promise<void> => {
-      const { address } = req.params;
+      // Validate before querying to avoid malformed input reaching the database.
+      const normalizedAddress = req.params.address.trim().toUpperCase();
+      if (!isValidStellarPublicKey(normalizedAddress)) {
+        res.status(400).json({ error: INVALID_ADDRESS_ERROR });
+        return;
+      }
+
+      const address = normalizedAddress;
       const key = `profile:${address}`;
       try {
         const data = await cached(key, TTL.profile, async () => {

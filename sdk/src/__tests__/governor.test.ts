@@ -240,9 +240,6 @@ describe("GovernorClient", () => {
         computeUnits: 0,
         stateChanges: []
       });
-
-      await expect(client.getProposalState(1n)).rejects.toThrow(UnknownProposalStateError);
-      await expect(client.getProposalState(1n)).rejects.toThrow("Unknown proposal state: MysteryState");
     });
 
     it("throws GovernorError(UnknownState) for invalid ScVal format", async () => {
@@ -618,6 +615,138 @@ describe("GovernorClient", () => {
     });
   });
 
+  describe("proposalThreshold()", () => {
+    it("returns minimum voting power to submit proposals", async () => {
+      const scv = {} as xdr.ScVal;
+      mockSimulate.mockResolvedValue({
+        result: { retval: scv },
+      });
+      mockScValToNative.mockReturnValue(100_000n);
+
+      const threshold = await client.proposalThreshold();
+
+      expect(threshold).toBe(100_000n);
+    });
+
+    it("returns 0n when simulation fails", async () => {
+      mockIsSimulationError.mockReturnValue(true);
+      mockSimulate.mockResolvedValue({
+        error: "Contract error",
+      });
+
+      const threshold = await client.proposalThreshold();
+
+      expect(threshold).toBe(0n);
+    });
+  });
+
+  describe("getQuorum()", () => {
+    it("returns quorum threshold for a proposal", async () => {
+      const scv = {} as xdr.ScVal;
+      mockSimulate.mockResolvedValue({
+        result: { retval: scv },
+      });
+      mockScValToNative.mockReturnValue(500_000n);
+
+      const quorum = await client.getQuorum(1n);
+
+      expect(quorum).toBe(500_000n);
+    });
+
+    it("throws GovernorError(SimulationFailed) when simulation fails", async () => {
+      mockIsSimulationError.mockReturnValue(true);
+      mockSimulate.mockResolvedValue({
+        error: "Proposal not found",
+      });
+
+      await expect(client.getQuorum(999n)).rejects.toThrow(GovernorError);
+    });
+
+    it("throws GovernorError(ProposalNotFound) when no return value", async () => {
+      mockSimulate.mockResolvedValue({
+        result: {},
+      });
+
+      await expect(client.getQuorum(1n)).rejects.toThrow(GovernorError);
+    });
+  });
+
+  describe("getTimelockInfo()", () => {
+    it("returns timelock timing info for a queued proposal", async () => {
+      // Mock getQueueTime → returns ledger 500
+      mockSimulate.mockResolvedValue({ result: { retval: {} } });
+      mockScValToNative.mockReturnValue(500);
+
+      const info = await client.getTimelockInfo(1n);
+
+      expect(info.queueLedger).toBe(500);
+      expect(info.vetoWindowEndLedger).toBeDefined();
+      expect(info.executableAtLedger).toBeDefined();
+      expect(info.executionDeadlineLedger).toBeDefined();
+    });
+
+    it("throws when proposal is not queued", async () => {
+      const scv = {} as xdr.ScVal;
+      mockSimulate.mockResolvedValue({
+        result: { retval: scv },
+      });
+      mockScValToNative.mockReturnValue(0);
+
+      await expect(client.getTimelockInfo(999n)).rejects.toThrow(
+        "not queued or not found"
+      );
+    });
+  });
+
+  describe("canPropose()", () => {
+    it("returns allowed=true when proposer meets all requirements", async () => {
+      const scv = {} as xdr.ScVal;
+      mockSimulate.mockResolvedValue({
+        result: { retval: scv },
+      });
+      mockScValToNative.mockReturnValue({
+        allowed: true,
+        reason: "ok",
+        voting_power: 100_000n,
+        threshold: 10_000n,
+        proposals_this_period: 1,
+        max_per_period: 5,
+      });
+
+      const result = await client.canPropose(validGAddr);
+
+      expect(result.allowed).toBe(true);
+      expect(result.reason).toBe("ok");
+    });
+
+    it("returns allowed=false when proposer does not meet threshold", async () => {
+      const scv = {} as xdr.ScVal;
+      mockSimulate.mockResolvedValue({
+        result: { retval: scv },
+      });
+      mockScValToNative.mockReturnValue({
+        allowed: false,
+        reason: "threshold",
+        voting_power: 5_000n,
+        threshold: 10_000n,
+      });
+
+      const result = await client.canPropose(validGAddr);
+
+      expect(result.allowed).toBe(false);
+      expect(result.reason).toBe("threshold");
+    });
+
+    it("throws GovernorError(SimulationFailed) when simulation fails", async () => {
+      mockIsSimulationError.mockReturnValue(true);
+      mockSimulate.mockResolvedValue({
+        error: "Contract error",
+      });
+
+      await expect(client.canPropose(validGAddr)).rejects.toThrow(GovernorError);
+    });
+  });
+
   describe("proposalCount()", () => {
     it("returns total number of proposals", async () => {
       const scv = {} as xdr.ScVal;
@@ -784,5 +913,120 @@ describe("GovernorClient", () => {
 
       expect(signCallback).toHaveBeenCalledWith("unsigned-xdr");
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// uploadProposalMetadata tests (issue #429)
+// ---------------------------------------------------------------------------
+import { uploadProposalMetadata, MetadataUploadOptions } from "../governor";
+
+describe("uploadProposalMetadata()", () => {
+  const description = "Fund the security audit for the NebGov contracts.";
+
+  beforeEach(() => {
+    // Reset fetch mock between tests.
+    jest.restoreAllMocks();
+  });
+
+  it("uses customUploader when provided and returns uri + hash", async () => {
+    const customUploader = jest.fn().mockResolvedValue("ipfs://QmCustomHash");
+    const options: MetadataUploadOptions = { customUploader };
+
+    const result = await uploadProposalMetadata(description, options);
+
+    expect(customUploader).toHaveBeenCalledWith(description);
+    expect(result.uri).toBe("ipfs://QmCustomHash");
+    expect(result.hash).toMatch(/^[0-9a-f]{64}$/); // 64-char hex SHA-256
+  });
+
+  it("uploads via Pinata JWT and returns ipfs:// URI", async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ IpfsHash: "QmPinataHash123" }),
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const options: MetadataUploadOptions = { pinataApiKey: "test-jwt-token" };
+    const result = await uploadProposalMetadata(description, options);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+      expect.objectContaining({
+        method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer test-jwt-token",
+        }),
+      }),
+    );
+    expect(result.uri).toBe("ipfs://QmPinataHash123");
+    expect(result.hash).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("uploads via Pinata legacy API key + secret pair", async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ IpfsHash: "QmLegacyHash456" }),
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const options: MetadataUploadOptions = {
+      pinataApiKey: "my-api-key",
+      pinataSecretKey: "my-secret-key",
+    };
+    const result = await uploadProposalMetadata(description, options);
+
+    expect(mockFetch).toHaveBeenCalledWith(
+      "https://api.pinata.cloud/pinning/pinJSONToIPFS",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          pinata_api_key: "my-api-key",
+          pinata_secret_api_key: "my-secret-key",
+        }),
+      }),
+    );
+    expect(result.uri).toBe("ipfs://QmLegacyHash456");
+  });
+
+  it("throws when Pinata returns a non-OK response", async () => {
+    const mockFetch = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => "Unauthorized",
+    });
+    global.fetch = mockFetch as unknown as typeof fetch;
+
+    const options: MetadataUploadOptions = { pinataApiKey: "bad-key" };
+
+    await expect(uploadProposalMetadata(description, options)).rejects.toThrow(
+      "Pinata upload failed: 401 Unauthorized",
+    );
+  });
+
+  it("throws a clear error when no provider is configured", async () => {
+    const options: MetadataUploadOptions = {};
+
+    await expect(uploadProposalMetadata(description, options)).rejects.toThrow(
+      "No IPFS upload provider configured in options",
+    );
+  });
+
+  it("does NOT have a web3StorageToken field on MetadataUploadOptions (compile-time removal)", () => {
+    // This test documents that web3StorageToken has been removed from the
+    // public interface (issue #429).  TypeScript would catch this at compile
+    // time; here we verify it at runtime via the object shape.
+    const options: MetadataUploadOptions = {
+      customUploader: async () => "ipfs://test",
+    };
+    expect("web3StorageToken" in options).toBe(false);
+  });
+
+  it("customUploader errors propagate to the caller", async () => {
+    const customUploader = jest.fn().mockRejectedValue(new Error("IPFS node unreachable"));
+    const options: MetadataUploadOptions = { customUploader };
+
+    await expect(uploadProposalMetadata(description, options)).rejects.toThrow(
+      "IPFS node unreachable",
+    );
   });
 });

@@ -25,7 +25,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v3
         with:
-          version: 8
+          version: 9
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -36,6 +36,11 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        working-directory: .
+
+      - name: Build SDK
+        run: pnpm --filter @nebgov/sdk run build
+        working-directory: .
 
       - name: Lint
         run: pnpm eslint .

@@ -92,6 +92,7 @@ pub enum DataKey {
     SpentThisPeriod(Address, u32),
     IsSlashed(Address),
     SlashingHistory(Address),
+    PendingOwner,
 }
 
 #[contractclient(name = "TreasuryClient")]
@@ -112,10 +113,7 @@ impl TreasuryContract {
     /// Initialize with owners, threshold, and governor address.
     pub fn initialize(env: Env, owners: Vec<Address>, threshold: u32, governor: Address) {
         assert!(!owners.is_empty(), "no owners");
-        assert!(
-            threshold > 0 && threshold <= owners.len(),
-            "bad threshold"
-        );
+        assert!(threshold > 0 && threshold <= owners.len(), "bad threshold");
         env.storage().instance().set(&DataKey::Owners, &owners);
         env.storage()
             .instance()
@@ -142,6 +140,45 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&DataKey::DayWindowStart, &env.ledger().timestamp());
+    }
+
+    /// Propose a new owner (governor) for the treasury.
+    /// Current governor must call this.
+    pub fn propose_owner(env: Env, new_owner: Address) {
+        let governor: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Governor)
+            .expect("not initialized");
+        governor.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingOwner, &new_owner);
+        env.events()
+            .publish((Symbol::new(&env, "OwnershipProposed"),), (new_owner,));
+    }
+
+    /// Accept ownership of the treasury.
+    /// New owner must call this to finalize the transfer.
+    pub fn accept_ownership(env: Env) {
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingOwner)
+            .expect("no pending owner");
+        pending.require_auth();
+        env.storage().instance().set(&DataKey::Governor, &pending);
+        env.storage().instance().remove(&DataKey::PendingOwner);
+        env.events()
+            .publish((Symbol::new(&env, "OwnershipTransferred"),), (pending,));
+    }
+
+    /// Get the current owner (governor) address.
+    pub fn get_owner(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Governor)
+            .expect("not initialized")
     }
 
     /// Configure a per-token spending cap for batch transfers.
@@ -174,9 +211,7 @@ impl TreasuryContract {
 
     /// Get the configured spending cap for a token, if any.
     pub fn get_spending_cap(env: Env, token: Address) -> Option<SpendingCap> {
-        env.storage()
-            .instance()
-            .get(&DataKey::SpendingCap(token))
+        env.storage().instance().get(&DataKey::SpendingCap(token))
     }
 
     /// Get the amount spent in the current spending period for a token.
@@ -497,18 +532,20 @@ impl TreasuryContract {
         ));
 
         if cap.is_some() {
-            env.storage()
-                .persistent()
-                .set(&DataKey::SpentThisPeriod(token.clone(), period_start), &new_spent);
+            env.storage().persistent().set(
+                &DataKey::SpentThisPeriod(token.clone(), period_start),
+                &new_spent,
+            );
         }
 
         let hash = env.crypto().sha256(&hash_input);
         let op_hash = Bytes::from_array(&env, &hash.to_array());
 
         env.events().publish(
-            (symbol_short!("bat_xfer"),),
-            (op_hash.clone(), recipients.len()),
+            (symbol_short!("bat_xfer"), token.clone()),
+            (op_hash.clone(), recipients.len() as u32, total_amount),
         );
+
 
         op_hash
     }
@@ -1497,5 +1534,185 @@ mod tests {
 
         let non_owner = Address::generate(&env);
         client.slash_signer(&governor, &non_owner, &Symbol::new(&env, "bad"));
+    }
+
+    // ── cancel tests ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cancel_pending_by_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let mut owners = Vec::new(&env);
+        owners.push_back(owner.clone());
+        client.initialize(&owners, &1u32, &governor);
+
+        let data = Bytes::new(&env);
+        let tx_id = client.submit(&owner, &target, &symbol_short!("transfer"), &data);
+
+        let tx_before = client.get_tx(&tx_id);
+        assert!(!tx_before.executed);
+        assert!(!tx_before.cancelled);
+
+        client.cancel(&owner, &tx_id);
+
+        let tx_after = client.get_tx(&tx_id);
+        assert!(!tx_after.executed);
+        assert!(tx_after.cancelled);
+    }
+
+    #[test]
+    fn test_cancel_pending_by_governor() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let mut owners = Vec::new(&env);
+        owners.push_back(owner.clone());
+        client.initialize(&owners, &1u32, &governor);
+
+        let data = Bytes::new(&env);
+        let tx_id = client.submit(&owner, &target, &symbol_short!("transfer"), &data);
+
+        client.cancel(&governor, &tx_id);
+
+        let tx = client.get_tx(&tx_id);
+        assert!(tx.cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid state")]
+    fn test_cancel_already_cancelled() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let mut owners = Vec::new(&env);
+        owners.push_back(owner.clone());
+        client.initialize(&owners, &1u32, &governor);
+
+        let data = Bytes::new(&env);
+        let tx_id = client.submit(&owner, &target, &symbol_short!("transfer"), &data);
+
+        client.cancel(&owner, &tx_id);
+
+        client.cancel(&owner, &tx_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "tx not found")]
+    fn test_cancel_nonexistent_tx() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        client.cancel(&governor, &999u64);
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_cancel_unauthorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let owner = Address::generate(&env);
+        let target = Address::generate(&env);
+        let mut owners = Vec::new(&env);
+        owners.push_back(owner.clone());
+        client.initialize(&owners, &1u32, &governor);
+
+        let data = Bytes::new(&env);
+        let tx_id = client.submit(&owner, &target, &symbol_short!("transfer"), &data);
+
+        let rando = Address::generate(&env);
+        client.cancel(&rando, &tx_id);
+    }
+
+    // ── ownership transfer tests ─────────────────────────────────────────────
+
+    #[test]
+    fn test_propose_and_accept_ownership() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let new_governor = Address::generate(&env);
+
+        assert_eq!(client.get_owner(), governor);
+
+        client.propose_owner(&new_governor);
+
+        assert_eq!(client.get_owner(), governor);
+
+        client.accept_ownership();
+
+        assert_eq!(client.get_owner(), new_governor);
+    }
+
+    #[test]
+    #[should_panic(expected = "HostError: Error(Auth, InvalidAction)")]
+    fn test_propose_ownership_requires_auth() {
+        let env = Env::default();
+
+        let (treasury_id, _token_addr, _governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let new_governor = Address::generate(&env);
+
+        client.propose_owner(&new_governor);
+    }
+
+    #[test]
+    fn test_accept_ownership_and_transfer_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        let new_governor = Address::generate(&env);
+
+        client.propose_owner(&new_governor);
+        client.accept_ownership();
+
+        assert_eq!(client.get_owner(), new_governor);
+        assert_ne!(client.get_owner(), governor);
+
+        let newer_governor = Address::generate(&env);
+        client.propose_owner(&newer_governor);
+        client.accept_ownership();
+        assert_eq!(client.get_owner(), newer_governor);
+    }
+
+    #[test]
+    #[should_panic(expected = "no pending owner")]
+    fn test_accept_ownership_with_no_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (treasury_id, _token_addr, _governor) = setup(&env);
+        let client = TreasuryContractClient::new(&env, &treasury_id);
+
+        client.accept_ownership();
     }
 }

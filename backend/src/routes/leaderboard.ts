@@ -3,6 +3,7 @@ import { z } from "zod";
 import pool from "../db/pool";
 import { validate } from "../middleware/validate";
 import { LeaderboardHistoryWithUser } from "../entities/LeaderboardHistory";
+import { logger } from "../logger";
 
 const router = Router();
 
@@ -87,7 +88,7 @@ router.get(
         },
       });
     } catch (error) {
-      console.error("Error fetching leaderboard history:", error);
+      logger.error({ err: error }, "Error fetching leaderboard history");
       res.status(500).json({ error: "Failed to fetch leaderboard history" });
     }
   },

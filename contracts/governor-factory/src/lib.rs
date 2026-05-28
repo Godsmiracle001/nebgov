@@ -3,8 +3,19 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractclient, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, Address,
+    BytesN, Env,
 };
+
+/// Error codes returned by the governor factory.
+#[contracterror]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FactoryError {
+    InvalidVotingPeriod = 1,
+    InvalidQuorumNumerator = 2,
+    InvalidTimelockDelay = 3,
+    InvalidVoteType = 4,
+}
 
 #[contracttype]
 #[derive(Clone)]
@@ -66,6 +77,13 @@ pub trait GovernorTrait {
         vote_type: VoteType,
         proposal_grace_period: u32,
     );
+    fn set_initial_config(
+        env: Env,
+        admin: Address,
+        max_calldata_size: u32,
+        proposal_cooldown: u32,
+        max_proposals_per_period: u32,
+    );
 }
 
 #[contract]
@@ -114,6 +132,21 @@ impl GovernorFactoryContract {
         proposal_grace_period: u32,
     ) -> u64 {
         deployer.require_auth();
+
+        // Validate settings before deploying so misconfigured governors are
+        // rejected before any contract deployment takes place.
+        if voting_period == 0 {
+            env.panic_with_error(FactoryError::InvalidVotingPeriod);
+        }
+        if quorum_numerator == 0 {
+            env.panic_with_error(FactoryError::InvalidQuorumNumerator);
+        }
+        if timelock_delay == 0 {
+            env.panic_with_error(FactoryError::InvalidTimelockDelay);
+        }
+        if vote_type > 2 {
+            env.panic_with_error(FactoryError::InvalidVoteType);
+        }
 
         let count: u64 = env
             .storage()
@@ -245,10 +278,10 @@ impl GovernorFactoryContract {
 
         let entry = GovernorEntry {
             id,
-            governor: governor_addr,
-            timelock: timelock_addr,
-            token: token_votes_addr,
-            deployer,
+            governor: governor_addr.clone(),
+            timelock: timelock_addr.clone(),
+            token: token_votes_addr.clone(),
+            deployer: deployer.clone(),
         };
 
         env.storage()
@@ -256,7 +289,16 @@ impl GovernorFactoryContract {
             .set(&DataKey::Governor(id), &entry);
         env.storage().instance().set(&DataKey::GovernorCount, &id);
 
-        env.events().publish((symbol_short!("deploy"),), id);
+        env.events().publish(
+            (symbol_short!("deploy"),),
+            (
+                id,
+                governor_addr.clone(),
+                timelock_addr.clone(),
+                token_votes_addr.clone(),
+                deployer.clone(),
+            ),
+        );
 
         id
     }

@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import pool from "../db/pool";
 import { validate } from "../middleware/validate";
+import { logger } from "../logger";
 
 const router = Router();
 
@@ -80,7 +81,7 @@ router.post(
         wallet_address: walletAddress,
       });
     } catch (error) {
-      console.error("Error in /auth/login:", error);
+      logger.error({ err: error }, "Error in /auth/login");
       res.status(500).json({ error: "Failed to login" });
     }
   },
@@ -162,7 +163,7 @@ router.post("/refresh", async (req, res) => {
 
     res.json({ accessToken });
   } catch (error) {
-    console.error("Error in /auth/refresh:", error);
+    logger.error({ err: error }, "Error in /auth/refresh");
     res.status(500).json({ error: "Failed to refresh token" });
   }
 });
@@ -188,7 +189,7 @@ router.post("/logout", async (req, res) => {
 
     res.json({ message: "Logged out successfully" });
   } catch (error) {
-    console.error("Error in /auth/logout:", error);
+    logger.error({ err: error }, "Error in /auth/logout");
     res.status(500).json({ error: "Failed to logout" });
   }
 });
