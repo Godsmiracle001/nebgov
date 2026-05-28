@@ -155,6 +155,7 @@ router.get(
 // GET /competitions/:id - Get single competition
 router.get(
   "/:id",
+  authenticate,
   validate({ params: getCompetitionSchema }),
   async (req: AuthRequest, res: Response) => {
     const competitionId = (req.params as any).id;
