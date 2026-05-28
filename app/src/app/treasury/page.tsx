@@ -255,10 +255,14 @@ export default function TreasuryPage() {
       const msg =
         e instanceof Error ? e.message : "Failed to load treasury data";
       setError(msg);
+      if (isConnected && publicKey) {
+        setOwnerOnChain(false);
+        setOwnerCheckComplete(true);
+      }
     } finally {
       setLoading(false);
     }
-  }, [fetchPendingTxs, readViewer]);
+  }, [fetchPendingTxs, isConnected, publicKey, readViewer]);
 
   useEffect(() => {
     if (!readViewer) {
