@@ -378,18 +378,14 @@ impl GovernorContract {
                 ((timelock.min_delay() + timelock.execution_window()) / Self::SECONDS_PER_LEDGER) as u32
             }
         };
-        
-        // Calculate remaining ledgers until proposal end
+
         let ledgers_until_end = proposal.end_ledger.saturating_sub(current);
-        
-        // Total TTL: remaining voting period + grace period + timelock operations + buffer
-        // The buffer ensures we don't expire even if timing is tight
+
         let ttl_ledgers = ledgers_until_end
             .saturating_add(grace_period)
             .saturating_add(timelock_delay_ledgers)
-            .saturating_add(1000); // 1000 ledger safety buffer (~83 minutes)
-        
-        // Extend the TTL for the proposal storage entry
+            .saturating_add(1000);
+
         env.storage()
             .persistent()
             .extend_ttl(&DataKey::Proposal(proposal_id), ttl_ledgers, ttl_ledgers);
