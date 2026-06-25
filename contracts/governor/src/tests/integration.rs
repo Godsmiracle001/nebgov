@@ -832,6 +832,79 @@ fn test_multi_token_quorum_uses_weighted_total_supply_sum() {
 }
 
 #[test]
+fn test_multi_token_cast_vote_and_quorum_with_two_weighted_tokens() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let guardian = Address::generate(&env);
+    let proposer = Address::generate(&env);
+    let voter = Address::generate(&env);
+
+    let token_a = env.register(ConfigurableVotesContract, ());
+    let token_b = env.register(ConfigurableVotesContract, ());
+
+    let token_a_client = ConfigurableVotesContractClient::new(&env, &token_a);
+    let token_b_client = ConfigurableVotesContractClient::new(&env, &token_b);
+
+    token_a_client.set_total_supply(&10_000);
+    token_b_client.set_total_supply(&5_000);
+    token_a_client.set_votes(&voter, &2_000);
+    token_b_client.set_votes(&voter, &1_000);
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+    let mock_target_id = env.register(MockTarget, ());
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &0, &1_209_600);
+    governor_client.initialize(
+        &admin,
+        &token_a,
+        &timelock_id,
+        &10,
+        &20,
+        &20,
+        &0,
+        &guardian,
+        &VoteType::Extended,
+        &120_960,
+    );
+
+    let strategy = make_multi_token_strategy(
+        &env,
+        &[(token_a.clone(), 6_000), (token_b.clone(), 4_000)],
+    );
+    governor_client.set_voting_strategy(&strategy);
+
+    let proposal_id = propose_exec_gov(
+        &env,
+        &governor_client,
+        &proposer,
+        &mock_target_id,
+        b"multi-token-two-token-weighted",
+    );
+
+    assert_eq!(governor_client.quorum(&proposal_id), 1_600);
+
+    env.ledger().with_mut(|l| l.sequence_number = 11);
+    governor_client.cast_vote(&voter, &proposal_id, &VoteSupport::For);
+
+    let (votes_for, votes_against, votes_abstain) = governor_client.proposal_votes(&proposal_id);
+    assert_eq!(votes_for, 1_600);
+    assert_eq!(votes_against, 0);
+    assert_eq!(votes_abstain, 0);
+    assert!(governor_client.is_quorum_reached(&proposal_id));
+
+    env.ledger().with_mut(|l| l.sequence_number = 31);
+    assert_eq!(
+        governor_client.state(&proposal_id),
+        ProposalState::Succeeded
+    );
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #27)")]
 fn test_multi_token_overflow_is_rejected() {
     let env = Env::default();

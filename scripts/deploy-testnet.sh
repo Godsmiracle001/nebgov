@@ -38,7 +38,14 @@ if [[ -f "$ENV_FILE" ]]; then
   source "$ENV_FILE"
   set +a
 else
-  if [[ -f "$ROOT_DIR/.env.example" ]]; then
+  if [[ -f "$ROOT_DIR/.env.testnet.example" ]]; then
+    info "No $ENV_FILE found — copying from .env.testnet.example"
+    cp "$ROOT_DIR/.env.testnet.example" "$ENV_FILE"
+    set -a
+    # shellcheck source=/dev/null
+    source "$ENV_FILE"
+    set +a
+  elif [[ -f "$ROOT_DIR/.env.example" ]]; then
     info "No $ENV_FILE found — copying from .env.example"
     cp "$ROOT_DIR/.env.example" "$ENV_FILE"
     set -a

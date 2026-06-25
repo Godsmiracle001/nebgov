@@ -65,8 +65,12 @@ fn setup_liquidity() -> (Env, Address, Address, Address, Address, Address, Addre
     let trader = Address::generate(&env);
     let admin = Address::generate(&env);
 
-    let token_a = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token_b = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
 
     let sac_a = StellarAssetClient::new(&env, &token_a);
     let sac_b = StellarAssetClient::new(&env, &token_b);
@@ -77,7 +81,39 @@ fn setup_liquidity() -> (Env, Address, Address, Address, Address, Address, Addre
 
     client.initialize(&governor);
 
-    (env, contract_id, governor, provider, trader, token_a, token_b)
+    (
+        env,
+        contract_id,
+        governor,
+        provider,
+        trader,
+        token_a,
+        token_b,
+    )
+}
+
+fn setup_pool(
+    client: &LiquidityContractClient<'_>,
+    governor: &Address,
+    outcome_a: u32,
+    outcome_b: u32,
+    token_a: &Address,
+    token_b: &Address,
+) {
+    client.create_pool(governor, &outcome_a, &outcome_b, token_a, token_b);
+    client.initialize_pool(governor, &outcome_a, &outcome_b, &30);
+}
+
+fn mint_pair(
+    env: &Env,
+    token_a: &Address,
+    token_b: &Address,
+    account: &Address,
+    amount_a: i128,
+    amount_b: i128,
+) {
+    StellarAssetClient::new(env, token_a).mint(account, &amount_a);
+    StellarAssetClient::new(env, token_b).mint(account, &amount_b);
 }
 
 #[test]
@@ -89,9 +125,10 @@ fn test_initialize_sets_governor() {
 
 #[test]
 fn test_add_liquidity_creates_pool_and_position() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     let (lp_tokens, deposit_b) = client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     assert_eq!(lp_tokens, 10_000);
     assert_eq!(deposit_b, 10_000);
@@ -113,11 +150,58 @@ fn test_get_lp_position_defaults_to_zero() {
 }
 
 #[test]
-fn test_remove_liquidity_burns_lp_tokens() {
+fn test_initialize_pool_records_zero_reserve_pool_and_metadata() {
+    let (env, contract_id, governor, _, _, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+
+    let pool = client.get_pool(&0, &1);
+    assert_eq!(pool.reserve_a, 0);
+    assert_eq!(pool.reserve_b, 0);
+    assert_eq!(pool.total_lp_supply, 0);
+    assert_eq!(pool.fee_bps, 30);
+
+    let metadata = client.get_pool_metadata(&0, &1);
+    assert_eq!(metadata.created_by, governor);
+    assert_eq!(metadata.created_ledger, env.ledger().sequence());
+    assert_eq!(metadata.created_timestamp, env.ledger().timestamp());
+}
+
+#[test]
+#[should_panic(expected = "pool not initialized")]
+fn test_add_liquidity_rejects_uninitialized_pool() {
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    client.create_pool(&governor, &0, &1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
+}
+
+#[test]
+#[should_panic(expected = "only governor")]
+fn test_initialize_pool_rejects_non_governor() {
+    let (env, contract_id, _, provider, _, _token_a, _token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    client.initialize_pool(&provider, &0, &1, &30);
+}
+
+#[test]
+#[should_panic(expected = "only governor")]
+fn test_create_pool_rejects_non_governor() {
     let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     client.create_pool(&provider, &0, &1, &token_a, &token_b);
+}
+
+#[test]
+fn test_remove_liquidity_burns_lp_tokens() {
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     let (amount_a, amount_b) = client.remove_liquidity(&provider, &0, &1, &4_000);
 
@@ -133,10 +217,10 @@ fn test_remove_liquidity_burns_lp_tokens() {
 
 #[test]
 fn test_swap_updates_reserves_and_price() {
-    let (env, contract_id, _, provider, trader, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     let price_before = client.get_price(&0, &1);
     let amount_out = client.swap(&trader, &0, &1, &1_000, &0);
@@ -152,7 +236,7 @@ fn test_update_pool_fee_changes_fee_for_governor() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     client.update_pool_fee(&governor, &0, &1, &75);
 
@@ -163,11 +247,11 @@ fn test_update_pool_fee_changes_fee_for_governor() {
 #[test]
 #[should_panic(expected = "only governor")]
 fn test_update_pool_fee_rejects_non_governor() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let unauthorized = Address::generate(&env);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     client.update_pool_fee(&unauthorized, &0, &1, &75);
 }
@@ -175,10 +259,26 @@ fn test_update_pool_fee_rejects_non_governor() {
 #[test]
 #[should_panic(expected = "amounts must be positive")]
 fn test_add_liquidity_rejects_zero_amounts() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &0, &10_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_add_liquidity_rejects_arithmetic_overflow() {
+    let (env, contract_id, governor, _, _, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+    let whale = Address::generate(&env);
+    let provider2 = Address::generate(&env);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    StellarAssetClient::new(&env, &token_a).mint(&whale, &i128::MAX);
+    StellarAssetClient::new(&env, &token_b).mint(&whale, &i128::MAX);
+
+    client.add_liquidity(&whale, &0, &1, &i128::MAX, &i128::MAX);
+    client.add_liquidity(&provider2, &0, &1, &1_000, &1_000);
 }
 
 #[test]
@@ -187,7 +287,7 @@ fn test_update_pool_fee_rejects_excessive_fee() {
     let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     client.update_pool_fee(&governor, &0, &1, &1_001);
 }
@@ -209,8 +309,12 @@ fn test_governor_proposal_executes_liquidity_fee_update() {
     votes_client.set_votes(&voter, &500);
     votes_client.set_total_supply(&1_000);
 
-    let token_a = env.register_stellar_asset_contract_v2(admin.clone()).address();
-    let token_b = env.register_stellar_asset_contract_v2(admin.clone()).address();
+    let token_a = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    let token_b = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
     soroban_sdk::token::StellarAssetClient::new(&env, &token_a).mint(&provider, &1_000_000);
     soroban_sdk::token::StellarAssetClient::new(&env, &token_b).mint(&provider, &1_000_000);
 
@@ -224,7 +328,8 @@ fn test_governor_proposal_executes_liquidity_fee_update() {
     let governor_client = GovernorContractClient::new(&env, &governor_id);
 
     liquidity_client.initialize(&governor_id);
-    liquidity_client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    liquidity_client.create_pool(&governor_id, &0, &1, &token_a, &token_b);
+    liquidity_client.initialize_pool(&governor_id, &0, &1, &30);
     liquidity_client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
 
     timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
@@ -298,12 +403,13 @@ fn test_governor_proposal_executes_liquidity_fee_update() {
 fn test_add_liquidity_rejects_amount_b_below_ratio() {
     // Pool has a 1:2 ratio (A:B). A subsequent deposit providing too little B
     // must be rejected so the pool price cannot be manipulated downward.
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &20_000); // ratio 1:2
-    // required_b = 1_000 * 20_000 / 10_000 = 2_000; providing only 1_000 must panic
+                                                               // required_b = 1_000 * 20_000 / 10_000 = 2_000; providing only 1_000 must panic
     client.add_liquidity(&provider2, &0, &1, &1_000, &1_000);
 }
 
@@ -313,11 +419,13 @@ fn test_add_liquidity_excess_amount_b_only_credits_required() {
     // proportionally correct required_b is credited to pool reserves.
     // This prevents reserve_b inflation while allowing a caller-supplied
     // slippage buffer (excess is silently trimmed).
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &20_000); // ratio 1:2
+    mint_pair(&env, &token_a, &token_b, &provider2, 1_000, 2_000);
 
     // Provider2 declares amount_b = 99_990 (far above required 2_000 for 1_000 A).
     // Only required_b = 1_000 * 20_000 / 10_000 = 2_000 should be credited.
@@ -326,7 +434,7 @@ fn test_add_liquidity_excess_amount_b_only_credits_required() {
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 11_000);
     assert_eq!(pool.reserve_b, 22_000); // 20_000 + 2_000, not 20_000 + 99_990
-    // Ratio 1:2 preserved
+                                        // Ratio 1:2 preserved
     assert_eq!(pool.reserve_b / pool.reserve_a, 2);
 }
 
@@ -334,11 +442,13 @@ fn test_add_liquidity_excess_amount_b_only_credits_required() {
 fn test_add_liquidity_proportional_second_deposit_exact() {
     // A deposit providing exactly the proportional amount_b passes and
     // maintains the pool ratio without any rounding drift.
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &20_000); // ratio 1:2
+    mint_pair(&env, &token_a, &token_b, &provider2, 5_000, 10_000);
     client.add_liquidity(&provider2, &0, &1, &5_000, &10_000); // exact: 5000*2=10000
 
     let pool = client.get_pool(&0, &1);
@@ -351,14 +461,16 @@ fn test_add_liquidity_proportional_second_deposit_exact() {
 fn test_add_liquidity_lp_tokens_minted_correctly_for_second_deposit() {
     // LP tokens for a second deposit must be proportional to amount_a only,
     // ensuring both providers hold fair shares of the pool.
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     let (lp1, _) = client.add_liquidity(&provider, &0, &1, &10_000, &20_000);
     assert_eq!(lp1, 10_000);
 
     // 5_000 A is 50% of reserve_a=10_000 → should mint 5_000 LP tokens
+    mint_pair(&env, &token_a, &token_b, &provider2, 5_000, 10_000);
     let (lp2, _) = client.add_liquidity(&provider2, &0, &1, &5_000, &10_000);
     assert_eq!(lp2, 5_000);
 
@@ -372,9 +484,10 @@ fn test_add_liquidity_lp_tokens_minted_correctly_for_second_deposit() {
 fn test_add_liquidity_first_deposit_accepts_any_ratio() {
     // The first deposit (total_lp_supply == 0) sets the initial price and must
     // not be subject to any ratio check.
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     let (lp, deposit_b) = client.add_liquidity(&provider, &0, &1, &1_000, &99_000);
     assert_eq!(lp, 1_000);
     assert_eq!(deposit_b, 99_000);
@@ -394,15 +507,17 @@ fn test_add_liquidity_poc_attack_prevented() {
     //
     // After the fix, only required_b is credited for Bob's deposit, the pool
     // ratio stays at 1:2, and Alice's withdrawal recovers exactly what she put in.
-    let (env, contract_id, _, alice, _) = setup_liquidity();
+    let (env, contract_id, governor, alice, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let bob = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     // Alice: 10_000 A + 20_000 B → 10_000 LP, ratio 1:2
     client.add_liquidity(&alice, &0, &1, &10_000, &20_000);
 
     // Bob: 1_000 A + 100_000 B (attack: amount_b far exceeds the 1:2 ratio).
     // required_b = 1_000 * 20_000 / 10_000 = 2_000 → only 2_000 B credited.
+    mint_pair(&env, &token_a, &token_b, &bob, 1_000, 2_000);
     client.add_liquidity(&bob, &0, &1, &1_000, &100_000);
 
     let pool = client.get_pool(&0, &1);
@@ -427,13 +542,15 @@ fn test_add_liquidity_returns_actual_deposit_b() {
     // add_liquidity now returns (lp_tokens, deposit_b). deposit_b is the amount
     // of B actually credited — equal to required_b, not the caller-supplied amount_b.
     // Integrators must use deposit_b to reconcile their balance.
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &20_000); // ratio 1:2
 
     // required_b = 5_000 * 20_000 / 10_000 = 10_000; caller passes 50_000 as slippage buffer
+    mint_pair(&env, &token_a, &token_b, &provider2, 5_000, 10_000);
     let (lp_tokens, deposit_b) = client.add_liquidity(&provider2, &0, &1, &5_000, &50_000);
     assert_eq!(lp_tokens, 5_000);
     assert_eq!(deposit_b, 10_000); // only proportional amount credited, not 50_000
@@ -445,10 +562,11 @@ fn test_add_liquidity_rejects_required_b_below_minimum() {
     // On a heavily skewed pool (large reserve_a, tiny reserve_b), required_b for
     // a small deposit rounds down below MIN_LIQUIDITY. This must be rejected even
     // when amount_b is well above MIN_LIQUIDITY (the old guard was insufficient).
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     // Seed pool: 1_000_000 A vs 1_000 B (heavily skewed)
     client.add_liquidity(&provider, &0, &1, &1_000_000, &1_000);
     // required_b = 1_000 * 1_000 / 1_000_000 = 1 — below MIN_LIQUIDITY (1_000)
@@ -474,10 +592,13 @@ fn test_add_liquidity_rejects_deposit_that_mints_zero_lp_tokens() {
     //   Second deposit (1_000 A):
     //     required_b = 1_000 * 3_996_003 / 1_001_000 = 3_992  (≥ MIN_LIQUIDITY ✓)
     //     lp         = 1_000 * 1_000 / 1_001_000 = 0          (1_001_000 > 1_000_000)
-    let (env, contract_id, _, provider, _) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let provider2 = Address::generate(&env);
 
+    setup_pool(&client, &governor, 2, 3, &token_a, &token_b);
+    StellarAssetClient::new(&env, &token_a).mint(&provider, &1_000_000);
+    StellarAssetClient::new(&env, &token_b).mint(&provider, &1_000_000_000);
     client.add_liquidity(&provider, &2, &3, &1_000, &1_000_000_000);
     client.swap(&provider, &2, &3, &1_000_000, &0);
     // amount_b = 4_000 ≥ required_b = 3_992; only lp = 0 triggers the panic
@@ -491,12 +612,12 @@ fn test_add_liquidity_rejects_deposit_that_mints_zero_lp_tokens() {
 #[test]
 #[should_panic(expected = "invalid amount")]
 fn test_remove_liquidity_rejects_zero_shares() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-    
+
     // Attempt to remove zero shares - should panic with InvalidAmount
     client.remove_liquidity(&provider, &0, &1, &0);
 }
@@ -504,12 +625,12 @@ fn test_remove_liquidity_rejects_zero_shares() {
 #[test]
 #[should_panic(expected = "invalid amount")]
 fn test_remove_liquidity_rejects_negative_shares() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-    
+
     // Attempt to remove negative shares - should panic with InvalidAmount
     client.remove_liquidity(&provider, &0, &1, &-1);
 }
@@ -517,14 +638,14 @@ fn test_remove_liquidity_rejects_negative_shares() {
 #[test]
 #[should_panic(expected = "insufficient shares")]
 fn test_remove_liquidity_rejects_excessive_shares() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     // Provider adds 100 LP tokens
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     assert_eq!(client.get_lp_position(&provider, &0, &1), 10_000);
-    
+
     // Attempt to remove 10_001 shares (exceeds balance of 10_000) - should panic with InsufficientShares
     client.remove_liquidity(&provider, &0, &1, &10_001);
 }
@@ -532,41 +653,41 @@ fn test_remove_liquidity_rejects_excessive_shares() {
 #[test]
 #[should_panic(expected = "insufficient shares")]
 fn test_remove_liquidity_rejects_zero_share_provider_positive_amount() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
     let other_provider = Address::generate(&env);
 
     // Setup: provider1 adds liquidity
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-    
+
     // other_provider has zero LP shares (never added liquidity)
     assert_eq!(client.get_lp_position(&other_provider, &0, &1), 0);
-    
+
     // Attempt to remove positive shares as other_provider (who has 0 balance) - should panic with InsufficientShares
     client.remove_liquidity(&other_provider, &0, &1, &1);
 }
 
 #[test]
 fn test_remove_liquidity_valid_exact_balance() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     // Setup: provider adds 10_000 LP tokens
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     assert_eq!(client.get_lp_position(&provider, &0, &1), 10_000);
 
     // Remove exact balance (10_000 shares)
     let (amount_a, amount_b) = client.remove_liquidity(&provider, &0, &1, &10_000);
-    
+
     // Verify correct amounts returned (should be proportional to 100% of reserves)
     assert_eq!(amount_a, 10_000);
     assert_eq!(amount_b, 10_000);
-    
+
     // Verify provider's balance is now 0
     assert_eq!(client.get_lp_position(&provider, &0, &1), 0);
-    
+
     // Verify pool reserves are depleted
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 0);
@@ -576,24 +697,24 @@ fn test_remove_liquidity_valid_exact_balance() {
 
 #[test]
 fn test_remove_liquidity_valid_partial_removal() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     // Setup: provider adds 10_000 LP tokens
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
     assert_eq!(client.get_lp_position(&provider, &0, &1), 10_000);
 
     // Remove 50% (5_000 shares)
     let (amount_a, amount_b) = client.remove_liquidity(&provider, &0, &1, &5_000);
-    
+
     // Verify correct amounts returned (50% of reserves)
     assert_eq!(amount_a, 5_000);
     assert_eq!(amount_b, 5_000);
-    
+
     // Verify provider's remaining balance is 50%
     assert_eq!(client.get_lp_position(&provider, &0, &1), 5_000);
-    
+
     // Verify pool reserves are reduced by 50%
     let pool = client.get_pool(&0, &1);
     assert_eq!(pool.reserve_a, 5_000);
@@ -603,21 +724,21 @@ fn test_remove_liquidity_valid_partial_removal() {
 
 #[test]
 fn test_remove_liquidity_state_unchanged_on_invalid_amount_guard() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     // Setup: provider adds 10_000 LP tokens
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-    
+
     // Record initial state
     let initial_balance = client.get_lp_position(&provider, &0, &1);
     let initial_pool = client.get_pool(&0, &1);
-    
+
     // Attempt invalid removal (zero shares) - will panic
     let result = client.try_remove_liquidity(&provider, &0, &1, &0);
     assert!(result.is_err());
-    
+
     // Verify state is unchanged after failed guard
     assert_eq!(client.get_lp_position(&provider, &0, &1), initial_balance);
     let pool_after = client.get_pool(&0, &1);
@@ -628,21 +749,21 @@ fn test_remove_liquidity_state_unchanged_on_invalid_amount_guard() {
 
 #[test]
 fn test_remove_liquidity_state_unchanged_on_insufficient_shares_guard() {
-    let (env, contract_id, _, provider, _, token_a, token_b) = setup_liquidity();
+    let (env, contract_id, governor, provider, _, token_a, token_b) = setup_liquidity();
     let client = LiquidityContractClient::new(&env, &contract_id);
 
     // Setup: provider adds 10_000 LP tokens
-    client.create_pool(&provider, &0, &1, &token_a, &token_b);
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
     client.add_liquidity(&provider, &0, &1, &10_000, &10_000);
-    
+
     // Record initial state
     let initial_balance = client.get_lp_position(&provider, &0, &1);
     let initial_pool = client.get_pool(&0, &1);
-    
+
     // Attempt invalid removal (balance exceeded) - will panic
     let result = client.try_remove_liquidity(&provider, &0, &1, &10_001);
     assert!(result.is_err());
-    
+
     // Verify state is unchanged after failed guard
     assert_eq!(client.get_lp_position(&provider, &0, &1), initial_balance);
     let pool_after = client.get_pool(&0, &1);

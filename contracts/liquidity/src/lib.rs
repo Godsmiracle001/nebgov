@@ -17,13 +17,12 @@
 //! Access control model:
 //! - liquidity providers must authorize `add_liquidity` and `remove_liquidity`
 //! - traders must authorize `swap`
-//! - only the configured governor may call `update_pool_fee`
+//! - only the configured governor may call `create_pool`, `initialize_pool`, and `update_pool_fee`
 
 use soroban_sdk::token::TokenClient;
-use soroban_sdk::{contract, contractimpl, contracterror, contracttype, Address, Env};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
 
 const MIN_LIQUIDITY: i128 = 1_000;
-const DEFAULT_FEE_BPS: u32 = 30;
 const MAX_FEE_BPS: u32 = 1_000;
 
 #[contracttype]
@@ -37,6 +36,14 @@ pub struct Pool {
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PoolMetadata {
+    pub created_by: Address,
+    pub created_ledger: u32,
+    pub created_timestamp: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LPPosition {
     pub lp_tokens: i128,
 }
@@ -45,6 +52,7 @@ pub struct LPPosition {
 enum DataKey {
     Governor,
     Pool(u32, u32),
+    PoolMetadata(u32, u32),
     Position(Address, u32, u32),
     PoolTokens(u32, u32),
 }
@@ -59,6 +67,8 @@ pub enum LiquidityError {
     InsufficientShares = 2,
     /// Subsequent deposit does not maintain the pool's current reserve ratio.
     ImbalancedDeposit = 3,
+    /// Arithmetic overflow while calculating or updating pool accounting.
+    ArithmeticOverflow = 4,
 }
 
 #[contract]
@@ -94,11 +104,56 @@ impl LiquidityContract {
         token_b: Address,
     ) {
         caller.require_auth();
+        Self::require_governor(&env, &caller);
+
         let tokens_key = DataKey::PoolTokens(outcome_a, outcome_b);
         if env.storage().persistent().has(&tokens_key) {
             panic!("pool already exists");
         }
-        env.storage().persistent().set(&tokens_key, &(token_a, token_b));
+        env.storage()
+            .persistent()
+            .set(&tokens_key, &(token_a, token_b));
+    }
+
+    /// Initialize an explicitly approved pool with its starting fee.
+    ///
+    /// Token addresses are registered separately with `create_pool`; both steps
+    /// are governor-gated, and `add_liquidity` requires both records to exist.
+    pub fn initialize_pool(
+        env: Env,
+        caller: Address,
+        outcome_a: u32,
+        outcome_b: u32,
+        fee_bps: u32,
+    ) {
+        caller.require_auth();
+        Self::require_governor(&env, &caller);
+
+        if fee_bps > MAX_FEE_BPS {
+            panic!("fee too high");
+        }
+
+        let pool_key = Self::pool_key(outcome_a, outcome_b);
+        if env.storage().persistent().has(&pool_key) {
+            panic!("pool already initialized");
+        }
+
+        let pool = Pool {
+            reserve_a: 0,
+            reserve_b: 0,
+            total_lp_supply: 0,
+            fee_bps,
+        };
+        let metadata = PoolMetadata {
+            created_by: caller,
+            created_ledger: env.ledger().sequence(),
+            created_timestamp: env.ledger().timestamp(),
+        };
+
+        env.storage().persistent().set(&pool_key, &pool);
+        env.storage()
+            .persistent()
+            .set(&Self::pool_metadata_key(outcome_a, outcome_b), &metadata);
     }
 
     /// Add liquidity to a pool and mint LP shares.
@@ -132,7 +187,17 @@ impl LiquidityContract {
         let (token_a, token_b) = stored_tokens.expect("pool not registered");
 
         let pool_key = Self::pool_key(outcome_a, outcome_b);
-        let mut pool = Self::get_pool_or_default(&env, outcome_a, outcome_b);
+        let mut pool: Pool = env
+            .storage()
+            .persistent()
+            .get(&pool_key)
+            .expect("pool not initialized");
+        let position_key = Self::position_key(provider.clone(), outcome_a, outcome_b);
+        let mut position: LPPosition = env
+            .storage()
+            .persistent()
+            .get(&position_key)
+            .unwrap_or(LPPosition { lp_tokens: 0 });
 
         // For subsequent deposits, enforce the current reserve ratio so that
         // callers cannot shift the pool price by providing an arbitrary amount_b.
@@ -147,14 +212,14 @@ impl LiquidityContract {
             }
             (amount_a, amount_b)
         } else {
-            let required_b = (amount_a * pool.reserve_b) / pool.reserve_a;
+            let required_b = Self::checked_mul(&env, amount_a, pool.reserve_b) / pool.reserve_a;
             if required_b < MIN_LIQUIDITY {
                 panic!("below minimum liquidity");
             }
             if amount_b < required_b {
                 panic!("imbalanced deposit: amount_b below required ratio");
             }
-            let lp = (amount_a * pool.total_lp_supply) / pool.reserve_a;
+            let lp = Self::checked_mul(&env, amount_a, pool.total_lp_supply) / pool.reserve_a;
             if lp == 0 {
                 panic!("deposit too small: zero LP tokens would be minted");
             }
@@ -162,13 +227,25 @@ impl LiquidityContract {
         };
 
         // Effects
-        pool.reserve_a += amount_a;
-        pool.reserve_b += deposit_b;
-        pool.total_lp_supply += lp_tokens;
-        position.lp_tokens += lp_tokens;
+        pool.reserve_a = Self::checked_add(&env, pool.reserve_a, amount_a);
+        pool.reserve_b = Self::checked_add(&env, pool.reserve_b, deposit_b);
+        pool.total_lp_supply = Self::checked_add(&env, pool.total_lp_supply, lp_tokens);
+        position.lp_tokens = Self::checked_add(&env, position.lp_tokens, lp_tokens);
 
         env.storage().persistent().set(&pool_key, &pool);
         env.storage().persistent().set(&position_key, &position);
+
+        // Interactions
+        TokenClient::new(&env, &token_a).transfer(
+            &provider,
+            &env.current_contract_address(),
+            &amount_a,
+        );
+        TokenClient::new(&env, &token_b).transfer(
+            &provider,
+            &env.current_contract_address(),
+            &deposit_b,
+        );
 
         (lp_tokens, deposit_b)
     }
@@ -189,7 +266,8 @@ impl LiquidityContract {
             panic!("invalid amount");
         }
 
-        let provider_shares = Self::get_lp_position(env.clone(), provider.clone(), outcome_a, outcome_b);
+        let provider_shares =
+            Self::get_lp_position(env.clone(), provider.clone(), outcome_a, outcome_b);
         if lp_tokens > provider_shares {
             panic!("insufficient shares");
         }
@@ -226,8 +304,16 @@ impl LiquidityContract {
         env.storage().persistent().set(&position_key, &position);
 
         // Interactions
-        TokenClient::new(&env, &token_a).transfer(&env.current_contract_address(), &provider, &amount_a);
-        TokenClient::new(&env, &token_b).transfer(&env.current_contract_address(), &provider, &amount_b);
+        TokenClient::new(&env, &token_a).transfer(
+            &env.current_contract_address(),
+            &provider,
+            &amount_a,
+        );
+        TokenClient::new(&env, &token_b).transfer(
+            &env.current_contract_address(),
+            &provider,
+            &amount_b,
+        );
 
         (amount_a, amount_b)
     }
@@ -273,8 +359,16 @@ impl LiquidityContract {
         env.storage().persistent().set(&pool_key, &pool);
 
         // Interactions
-        TokenClient::new(&env, &token_in).transfer(&trader, &env.current_contract_address(), &amount_in);
-        TokenClient::new(&env, &token_out).transfer(&env.current_contract_address(), &trader, &amount_out_with_fee);
+        TokenClient::new(&env, &token_in).transfer(
+            &trader,
+            &env.current_contract_address(),
+            &amount_in,
+        );
+        TokenClient::new(&env, &token_out).transfer(
+            &env.current_contract_address(),
+            &trader,
+            &amount_out_with_fee,
+        );
 
         amount_out_with_fee
     }
@@ -312,6 +406,14 @@ impl LiquidityContract {
             .expect("pool not found")
     }
 
+    /// Get immutable metadata recorded when the pool was initialized.
+    pub fn get_pool_metadata(env: Env, outcome_a: u32, outcome_b: u32) -> PoolMetadata {
+        env.storage()
+            .persistent()
+            .get(&Self::pool_metadata_key(outcome_a, outcome_b))
+            .expect("pool metadata not found")
+    }
+
     /// Get the LP token balance for a provider in a specific pool.
     pub fn get_lp_position(env: Env, provider: Address, outcome_a: u32, outcome_b: u32) -> i128 {
         let position: LPPosition = env
@@ -339,20 +441,22 @@ impl LiquidityContract {
         DataKey::Pool(outcome_a, outcome_b)
     }
 
+    fn pool_metadata_key(outcome_a: u32, outcome_b: u32) -> DataKey {
+        DataKey::PoolMetadata(outcome_a, outcome_b)
+    }
+
     fn position_key(provider: Address, outcome_a: u32, outcome_b: u32) -> DataKey {
         DataKey::Position(provider, outcome_a, outcome_b)
     }
 
-    fn get_pool_or_default(env: &Env, outcome_a: u32, outcome_b: u32) -> Pool {
-        env.storage()
-            .persistent()
-            .get(&Self::pool_key(outcome_a, outcome_b))
-            .unwrap_or(Pool {
-                reserve_a: 0,
-                reserve_b: 0,
-                total_lp_supply: 0,
-                fee_bps: DEFAULT_FEE_BPS,
-            })
+    fn checked_add(env: &Env, lhs: i128, rhs: i128) -> i128 {
+        lhs.checked_add(rhs)
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::ArithmeticOverflow))
+    }
+
+    fn checked_mul(env: &Env, lhs: i128, rhs: i128) -> i128 {
+        lhs.checked_mul(rhs)
+            .unwrap_or_else(|| env.panic_with_error(LiquidityError::ArithmeticOverflow))
     }
 }
 
