@@ -1786,7 +1786,7 @@ fn test_cancel_queued_veto_window_uses_correct_conversion_factor() {
 /// start_ledger, end_ledger).
 fn setup_governor_with_proposal(
     env: &Env,
-) -> (Address, u64, u32, u32) {
+) -> (Address, Address, u64, u32, u32) {
     env.mock_all_auths_allowing_non_root_auth();
 
     let admin = Address::generate(env);
@@ -1827,14 +1827,14 @@ fn setup_governor_with_proposal(
     let start_ledger = proposal.start_ledger;
     let end_ledger = proposal.end_ledger;
 
-    (governor_id, proposal_id, start_ledger, end_ledger)
+    (governor_id, votes_id, proposal_id, start_ledger, end_ledger)
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #31)")]
 fn test_cast_vote_before_start_ledger_is_rejected() {
     let env = Env::default();
-    let (governor_id, proposal_id, start_ledger, _end_ledger) =
+    let (governor_id, _votes_id, proposal_id, start_ledger, _end_ledger) =
         setup_governor_with_proposal(&env);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
     let voter = Address::generate(&env);
@@ -1851,7 +1851,7 @@ fn test_cast_vote_before_start_ledger_is_rejected() {
 #[should_panic(expected = "Error(Contract, #31)")]
 fn test_cast_vote_after_end_ledger_is_rejected() {
     let env = Env::default();
-    let (governor_id, proposal_id, _start_ledger, end_ledger) =
+    let (governor_id, _votes_id, proposal_id, _start_ledger, end_ledger) =
         setup_governor_with_proposal(&env);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
     let voter = Address::generate(&env);
@@ -1867,7 +1867,7 @@ fn test_cast_vote_after_end_ledger_is_rejected() {
 #[should_panic(expected = "Error(Contract, #31)")]
 fn test_cast_vote_with_reason_after_end_ledger_is_rejected() {
     let env = Env::default();
-    let (governor_id, proposal_id, _start_ledger, end_ledger) =
+    let (governor_id, _votes_id, proposal_id, _start_ledger, end_ledger) =
         setup_governor_with_proposal(&env);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
     let voter = Address::generate(&env);
@@ -1884,28 +1884,14 @@ fn test_cast_vote_with_reason_after_end_ledger_is_rejected() {
 #[test]
 fn test_post_deadline_vote_cannot_flip_defeated_proposal() {
     let env = Env::default();
-    let (governor_id, proposal_id, start_ledger, end_ledger) =
+    let (governor_id, votes_id, proposal_id, start_ledger, end_ledger) =
         setup_governor_with_proposal(&env);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
+    let votes_client = ConfigurableVotesContractClient::new(&env, &votes_id);
 
-    let votes_id: Address = governor_client.get_settings().guardian; // just need any address
-    // Use two distinct voters
     let for_voter = Address::generate(&env);
     let against_voter = Address::generate(&env);
-
-    // Give the votes contract knowledge of these voters
-    let votes_contract_id = {
-        // Retrieve from settings — grab the votes token address from the proposal
-        let proposal = governor_client.get_proposal(&proposal_id);
-        drop(proposal);
-        // We can't easily get the votes token here without a getter, so use
-        // ConfigurableVotes directly via a fresh env call.  Instead we rely on
-        // the fact that the setup helper registered ConfigurableVotesContract
-        // first and gave it generic votes.  The attacker voter below has 0 votes
-        // (default), which is fine: we care that the CALL itself is rejected.
-        votes_id
-    };
-    drop(votes_contract_id);
+    votes_client.set_votes(&against_voter, &1_000_000);
 
     // Cast "against" vote during Active window → proposal ends Defeated.
     env.ledger().with_mut(|l| l.sequence_number = start_ledger + 1);
@@ -1942,12 +1928,15 @@ fn test_post_deadline_vote_cannot_flip_defeated_proposal() {
 #[test]
 fn test_cast_vote_succeeds_at_start_and_end_ledger_boundaries() {
     let env = Env::default();
-    let (governor_id, proposal_id, start_ledger, end_ledger) =
+    let (governor_id, votes_id, proposal_id, start_ledger, end_ledger) =
         setup_governor_with_proposal(&env);
     let governor_client = GovernorContractClient::new(&env, &governor_id);
+    let votes_client = ConfigurableVotesContractClient::new(&env, &votes_id);
 
     let voter_a = Address::generate(&env);
     let voter_b = Address::generate(&env);
+    votes_client.set_votes(&voter_a, &1_000_000);
+    votes_client.set_votes(&voter_b, &1_000_000);
 
     // Vote at exactly start_ledger — must succeed.
     env.ledger().with_mut(|l| l.sequence_number = start_ledger);
