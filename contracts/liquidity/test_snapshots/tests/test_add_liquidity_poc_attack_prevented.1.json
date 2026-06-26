@@ -2306,6 +2306,87 @@
         }
       },
       "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "LiquidityRemoved"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+              }
+            ],
+            "data": {
+              "map": [
+                {
+                  "key": {
+                    "symbol": "amount_a"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 10000
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "amount_b"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 20000
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "lp_tokens_burned"
+                  },
+                  "val": {
+                    "i128": {
+                      "hi": 0,
+                      "lo": 10000
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "outcome_a"
+                  },
+                  "val": {
+                    "u32": 0
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "outcome_b"
+                  },
+                  "val": {
+                    "u32": 1
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "provider"
+                  },
+                  "val": {
+                    "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
     }
   ]
 }

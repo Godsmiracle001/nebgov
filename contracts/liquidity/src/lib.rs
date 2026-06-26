@@ -19,6 +19,9 @@
 //! - traders must authorize `swap`
 //! - only the configured governor may call `create_pool`, `initialize_pool`, and `update_pool_fee`
 
+mod events;
+use events::*;
+
 use soroban_sdk::token::TokenClient;
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env};
 
@@ -247,6 +250,8 @@ impl LiquidityContract {
             &deposit_b,
         );
 
+        emit_liquidity_added(&env, &provider, outcome_a, outcome_b, amount_a, deposit_b, lp_tokens);
+
         (lp_tokens, deposit_b)
     }
 
@@ -315,6 +320,8 @@ impl LiquidityContract {
             &amount_b,
         );
 
+        emit_liquidity_removed(&env, &provider, outcome_a, outcome_b, amount_a, amount_b, lp_tokens);
+
         (amount_a, amount_b)
     }
 
@@ -370,6 +377,8 @@ impl LiquidityContract {
             &amount_out_with_fee,
         );
 
+        emit_swap(&env, &trader, outcome_in, outcome_out, amount_in, amount_out_with_fee, fee);
+
         amount_out_with_fee
     }
 
@@ -394,8 +403,10 @@ impl LiquidityContract {
             .persistent()
             .get(&pool_key)
             .expect("pool not found");
+        let old_fee_bps = pool.fee_bps;
         pool.fee_bps = fee_bps;
         env.storage().persistent().set(&pool_key, &pool);
+        emit_pool_fee_updated(&env, outcome_a, outcome_b, old_fee_bps, fee_bps);
     }
 
     /// Get the current pool state.
