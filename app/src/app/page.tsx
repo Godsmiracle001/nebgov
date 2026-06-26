@@ -14,6 +14,7 @@ import { ProposalCardSkeleton } from "../components/ui/ProposalCardSkeleton";
 import { useDebounce } from "../hooks/useDebounce";
 import { getErrorMessage, reportFrontendError } from "../lib/frontend-error";
 import { ProposalStateBadge } from "../components/ProposalStateBadge";
+import { CountdownTimer } from "../components/CountdownTimer";
 
 
 interface ProposalSummary {
@@ -22,7 +23,7 @@ interface ProposalSummary {
   state: ProposalState;
   votesFor: bigint;
   votesAgainst: bigint;
-  votesAbstain: bigint;
+  startLedger: number;
   endLedger: number;
 }
 
@@ -231,7 +232,7 @@ function ProposalsPageInner() {
           state: r.state!,
           votesFor: r.votes!.votesFor,
           votesAgainst: r.votes!.votesAgainst,
-          votesAbstain: r.votes!.votesAbstain,
+          startLedger: 0,
           endLedger: 0,
         }));
 
@@ -457,13 +458,15 @@ function ProposalsPageInner() {
                         )}
                       </div>
                     </div>
-                    <span
-                      className={`ml-4 shrink-0 px-3 py-1 rounded-full text-xs font-medium ${STATE_COLORS[p.state]}`}
-                      role="status"
-                      aria-label={`Proposal status: ${p.state}`}
-                    >
-                      <ProposalStateBadge state={p.state} />
-                    </span>
+                    {p.state === ProposalState.Active && p.endLedger > 0 && (
+                      <div className="mt-2">
+                        <CountdownTimer
+                          state={p.state}
+                          startLedger={p.startLedger}
+                          endLedger={p.endLedger}
+                        />
+                      </div>
+                    )}
                   </div>
                 </Link>
               );
