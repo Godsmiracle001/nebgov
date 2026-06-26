@@ -205,6 +205,18 @@ impl TimelockContract {
             .persistent()
             .set(&DataKey::BatchOperation(batch_op_id.clone()), &batch);
 
+        // Extend TTL to cover the full operation lifecycle (delay + execution window)
+        // plus a safety buffer. Stellar mainnet closes ledgers roughly every 5 seconds.
+        let seconds_until_expiry = delay + execution_window;
+        let ttl_ledgers = ((seconds_until_expiry / 5) + 1000) as u32;
+        env.storage()
+            .persistent()
+            .extend_ttl(
+                &DataKey::BatchOperation(batch_op_id.clone()),
+                ttl_ledgers,
+                ttl_ledgers,
+            );
+
         env.events()
             .publish((symbol_short!("schbatch"),), batch_op_id.clone());
         emit_batch_operation_scheduled(
@@ -525,6 +537,15 @@ impl TimelockContract {
         env.storage()
             .persistent()
             .set(&DataKey::Operation(op_id.clone()), &op);
+
+        // Extend TTL to cover the full operation lifecycle (delay + execution window)
+        // plus a safety buffer. Stellar mainnet closes ledgers roughly every 5 seconds.
+        let seconds_until_expiry = delay + execution_window;
+        let ttl_ledgers = ((seconds_until_expiry / 5) + 1000) as u32;
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Operation(op_id.clone()), ttl_ledgers, ttl_ledgers);
+
         env.events()
             .publish((symbol_short!("schedule"),), op_id.clone());
         emit_operation_scheduled(&env, &op_id, &target, &fn_name, ready_at, expires_at);
