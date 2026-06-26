@@ -20,6 +20,7 @@ import {
   ProposalSimulationResult,
   ProposalState,
   ProposalVotes,
+  SimulateResult,
   VoteSupport,
   VoteType,
   Network,
@@ -519,6 +520,88 @@ export class GovernorClient {
         return {
           success: false,
           error: error instanceof Error ? error.message : "Simulation failed",
+        };
+      }
+    });
+  }
+
+  /**
+   * Dry-run the `propose` transaction using Soroban's `simulateTransaction` RPC.
+   *
+   * Returns estimated CPU instructions, memory bytes, and fee in stroops without
+   * submitting a transaction. Also validates that the proposal would not
+   * immediately revert (e.g. threshold not met, governor paused, invalid calldata).
+   *
+   * @param proposer   Stellar address of the account that will submit the proposal
+   * @param description Human-readable proposal summary
+   * @param descriptionHash Hex-encoded SHA-256 of the full description
+   * @param metadataUri IPFS or HTTPS URI for the full proposal description
+   * @param targets    Target contract addresses (one per action)
+   * @param fnNames    Function names to invoke on each target
+   * @param calldatas  XDR-encoded arguments for each call
+   * @returns {@link SimulateResult} with fee estimates or an error
+   */
+  async simulatePropose(
+    proposer: string,
+    description: string,
+    descriptionHash: string,
+    metadataUri: string,
+    targets: string[],
+    fnNames: string[],
+    calldatas: (Buffer | Uint8Array)[],
+  ): Promise<SimulateResult> {
+    return this.retry(async () => {
+      try {
+        const hashBytes = hexToBytes32(descriptionHash);
+        const account = await this.server.getAccount(proposer);
+        const tx = new TransactionBuilder(account, {
+          fee: BASE_FEE,
+          networkPassphrase: this.networkPassphrase,
+        })
+          .addOperation(
+            this.contract.call(
+              "propose",
+              nativeToScVal(proposer, { type: "address" }),
+              nativeToScVal(description, { type: "string" }),
+              nativeToScVal(hashBytes, { type: "bytes" }),
+              nativeToScVal(metadataUri, { type: "string" }),
+              scVecAddress(targets),
+              scVecSymbol(fnNames),
+              scVecBytes(calldatas),
+            ),
+          )
+          .setTimeout(30)
+          .build();
+
+        const result = await this.server.simulateTransaction(tx);
+
+        if (SorobanRpc.Api.isSimulationError(result)) {
+          const err = result as unknown as { error?: string };
+          return { ok: false, error: err.error ?? "Simulation failed" };
+        }
+
+        const success = result as SorobanRpc.Api.SimulateTransactionSuccessResponse & {
+          cost?: { cpuInsns?: string; memBytes?: string };
+          minResourceFee?: unknown;
+          min_resource_fee?: unknown;
+        };
+
+        return {
+          ok: true,
+          cpuInsns: success.cost?.cpuInsns !== undefined
+            ? toBigInt(success.cost.cpuInsns)
+            : undefined,
+          memBytes: success.cost?.memBytes !== undefined
+            ? toBigInt(success.cost.memBytes)
+            : undefined,
+          feeStroops: toBigInt(
+            success.minResourceFee ?? success.min_resource_fee ?? BASE_FEE,
+          ),
+        };
+      } catch (e: unknown) {
+        return {
+          ok: false,
+          error: e instanceof Error ? e.message : "simulatePropose failed",
         };
       }
     });

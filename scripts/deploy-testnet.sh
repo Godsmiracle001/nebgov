@@ -208,6 +208,8 @@ DELAY="${VOTING_DELAY:-60}"
 PERIOD="${VOTING_PERIOD:-17280}"
 QUORUM="${QUORUM_NUMERATOR:-4}"
 THRESHOLD="${PROPOSAL_THRESHOLD:-100000000}"
+GUARDIAN="${GUARDIAN_ADDRESS:-$DEPLOYER_ADDR}"
+VOTE_TYPE="${VOTE_TYPE:-Extended}"
 
 info "Initializing governor ..."
 stellar contract invoke \
@@ -222,6 +224,8 @@ stellar contract invoke \
   --voting_period "$PERIOD" \
   --quorum_numerator "$QUORUM" \
   --proposal_threshold "$THRESHOLD" \
+  --guardian "$GUARDIAN" \
+  --vote_type "$VOTE_TYPE" \
   2>/dev/null && ok "governor initialized" \
   || warn "governor already initialized (or init failed — check manually)"
 
