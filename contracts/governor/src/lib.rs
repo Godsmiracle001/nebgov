@@ -1380,11 +1380,7 @@ impl GovernorContract {
             timelock.cancel(&gov_addr, &op_id);
         }
 
-        // Emit ProposalCancelledFromQueue event (TODO: add helper for veto event)
-        env.events().publish(
-            (Symbol::new(&env, "ProposalCancelled"), caller.clone()),
-            (proposal_id, queue_time, current_ledger),
-        );
+        events::emit_proposal_cancelled(&env, proposal_id, &caller);
     }
 
     /// Get the current state of a proposal.

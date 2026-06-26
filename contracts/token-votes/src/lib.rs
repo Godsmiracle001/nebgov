@@ -344,11 +344,10 @@ impl TokenVotesContract {
             "ledger must not exceed current ledger"
         );
 
-        let key = DataKey::Checkpoints(account);
         let checkpoints: soroban_sdk::Vec<Checkpoint> = env
             .storage()
             .persistent()
-            .get(&DataKey::Checkpoints(account))
+            .get(&DataKey::Checkpoints(account.clone()))
             .unwrap_or(soroban_sdk::Vec::new(&env));
 
         let cp = Self::binary_search(&checkpoints, ledger);
