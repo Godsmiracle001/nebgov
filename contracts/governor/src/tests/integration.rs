@@ -1707,7 +1707,58 @@ fn test_only_pauser_can_pause() {
     governor_client.pause(&non_pauser);
 }
 
-/// Test 5: set_pauser only via self-auth
+/// Test 5: Only pauser can unpause
+/// non-pauser address calls unpause() → expect UnauthorizedPause error (code 8)
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_only_pauser_can_unpause() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    // Setup
+    let admin = Address::generate(&env);
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = sac.address();
+
+    let votes_id = env.register(TokenVotesContract, ());
+    let votes_client = TokenVotesContractClient::new(&env, &votes_id);
+    votes_client.initialize(&admin, &token_addr);
+
+    let timelock_id = env.register(TimelockContract, ());
+    let governor_id = env.register(GovernorContract, ());
+
+    let timelock_client = TimelockContractClient::new(&env, &timelock_id);
+    let governor_client = GovernorContractClient::new(&env, &governor_id);
+
+    timelock_client.initialize(&admin, &governor_id, &1, &1_209_600);
+
+    let pauser = Address::generate(&env);
+    governor_client.initialize(
+        &admin,
+        &votes_id,
+        &timelock_id,
+        &10_u32,
+        &20_u32,
+        &0_u32,
+        &0_i128,
+        &pauser,
+        &VoteType::Extended,
+        &120_960u32,
+    );
+
+    governor_client.set_pauser(&pauser);
+    assert_eq!(governor_client.pauser(), pauser);
+
+    // Pause the contract first
+    governor_client.pause(&pauser);
+    assert!(governor_client.is_paused());
+
+    // Non-pauser tries to unpause - should fail with UnauthorizedPause (code 8)
+    let non_pauser = Address::generate(&env);
+    governor_client.unpause(&non_pauser);
+}
+
+/// Test 6: set_pauser only via self-auth
 /// direct call to set_pauser() with an external caller → expect auth error
 #[test]
 #[should_panic]

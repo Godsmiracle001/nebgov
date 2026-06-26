@@ -846,3 +846,112 @@ fn test_total_lp_supply_equals_sum_of_minted_lp_tokens() {
         lp2
     );
 }
+
+// ============================================================================
+// CONSTANT-PRODUCT INVARIANT TESTS (Issue #654)
+// ============================================================================
+
+#[test]
+fn test_constant_product_invariant_preserved_after_swap() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &100_000, &100_000);
+
+    let pool = client.get_pool(&0, &1);
+    let k_before = pool.reserve_a * pool.reserve_b;
+
+    client.swap(&trader, &0, &1, &10_000, &0);
+
+    let pool_after = client.get_pool(&0, &1);
+    let k_after = pool_after.reserve_a * pool_after.reserve_b;
+
+    // k must not decrease: fee is retained in reserves
+    assert!(k_after >= k_before, "k decreased: {} < {}", k_after, k_before);
+}
+
+#[test]
+fn test_constant_product_invariant_with_zero_fee() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.update_pool_fee(&governor, &0, &1, &0);
+    client.add_liquidity(&provider, &0, &1, &100_000, &100_000);
+
+    let pool = client.get_pool(&0, &1);
+    let k_before = pool.reserve_a * pool.reserve_b;
+
+    client.swap(&trader, &0, &1, &10_000, &0);
+
+    let pool_after = client.get_pool(&0, &1);
+    let k_after = pool_after.reserve_a * pool_after.reserve_b;
+
+    // With no fee, k must not decrease (integer division rounding increases k slightly)
+    assert!(k_after >= k_before, "zero-fee swap must preserve k: {} < {}", k_after, k_before);
+}
+
+#[test]
+fn test_constant_product_invariant_with_max_fee() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.update_pool_fee(&governor, &0, &1, &1000);
+    client.add_liquidity(&provider, &0, &1, &100_000, &100_000);
+
+    let pool = client.get_pool(&0, &1);
+    let k_before = pool.reserve_a * pool.reserve_b;
+
+    client.swap(&trader, &0, &1, &10_000, &0);
+
+    let pool_after = client.get_pool(&0, &1);
+    let k_after = pool_after.reserve_a * pool_after.reserve_b;
+
+    // With max fee (10%), k must increase
+    assert!(k_after > k_before, "max-fee swap must increase k: {} <= {}", k_after, k_before);
+}
+
+#[test]
+fn test_constant_product_invariant_large_swap() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &1_000_000, &1_000_000);
+
+    // Mint more tokens for a large swap
+    mint_pair(&env, &token_a, &token_b, &trader, 500_000, 0);
+
+    let pool = client.get_pool(&0, &1);
+    let k_before = pool.reserve_a * pool.reserve_b;
+
+    client.swap(&trader, &0, &1, &500_000, &0);
+
+    let pool_after = client.get_pool(&0, &1);
+    let k_after = pool_after.reserve_a * pool_after.reserve_b;
+
+    // k must not decrease even for large swaps
+    assert!(k_after >= k_before, "k decreased on large swap: {} < {}", k_after, k_before);
+}
+
+#[test]
+fn test_constant_product_invariant_small_swap() {
+    let (env, contract_id, governor, provider, trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &1_000_000, &1_000_000);
+
+    let pool = client.get_pool(&0, &1);
+    let k_before = pool.reserve_a * pool.reserve_b;
+
+    // Small swap (1 unit)
+    client.swap(&trader, &0, &1, &1, &0);
+
+    let pool_after = client.get_pool(&0, &1);
+    let k_after = pool_after.reserve_a * pool_after.reserve_b;
+
+    assert!(k_after >= k_before, "k decreased on small swap: {} < {}", k_after, k_before);
+}
