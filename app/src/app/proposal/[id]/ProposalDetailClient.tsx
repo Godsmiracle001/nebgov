@@ -847,7 +847,7 @@ export default function ProposalDetailClient({ params }: Props) {
                     Connect your wallet to vote on this proposal
                   </p>
                   <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
-                    You'll need GOV tokens to participate.
+                    You&apos;ll need GOV tokens to participate.
                   </p>
                 </div>
 
