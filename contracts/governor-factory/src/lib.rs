@@ -3,9 +3,12 @@
 #![allow(deprecated)]
 
 use soroban_sdk::{
-    contract, contractclient, contracterror, contractimpl, contracttype, symbol_short, token,
+    contract, contractclient, contracterror, contractimpl, contracttype, token,
     Address, BytesN, Env,
 };
+
+mod events;
+use events::emit_governor_deployed;
 
 const DEPLOYED_CONTRACT_COUNT: i128 = 3;
 const MIN_CONTRACT_RESERVE_STROOPS: i128 = 5_000_000;
@@ -317,15 +320,13 @@ impl GovernorFactoryContract {
             .set(&DataKey::Governor(id), &entry);
         env.storage().instance().set(&DataKey::GovernorCount, &id);
 
-        env.events().publish(
-            (
-                symbol_short!("deploy"),
-                id,
-                governor_addr.clone(),
-                timelock_addr.clone(),
-                token_votes_addr.clone(),
-            ),
-            deployer.clone(),
+        emit_governor_deployed(
+            &env,
+            id,
+            &governor_addr,
+            &timelock_addr,
+            &token_votes_addr,
+            &deployer,
         );
 
         id

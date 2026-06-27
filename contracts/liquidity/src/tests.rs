@@ -961,3 +961,38 @@ fn test_constant_product_invariant_small_swap() {
 
     assert!(k_after >= k_before, "k decreased on small swap: {} < {}", k_after, k_before);
 }
+
+#[test]
+fn test_get_pool_safe_returns_none_for_nonexistent_pool() {
+    let (env, contract_id, _governor, _provider, _trader, _token_a, _token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    let result = client.get_pool_safe(&0, &1);
+    assert_eq!(result, None);
+}
+
+#[test]
+fn test_get_pool_safe_returns_some_for_existing_pool() {
+    let (env, contract_id, governor, provider, _trader, token_a, token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    setup_pool(&client, &governor, 0, 1, &token_a, &token_b);
+    client.add_liquidity(&provider, &0, &1, &1_000_000, &1_000_000);
+
+    let safe = client.get_pool_safe(&0, &1);
+    assert!(safe.is_some());
+
+    let direct = client.get_pool(&0, &1);
+    assert_eq!(safe.unwrap(), direct);
+}
+
+#[test]
+#[should_panic]
+fn test_get_pool_still_panics_for_nonexistent_pool() {
+    let (env, contract_id, _governor, _provider, _trader, _token_a, _token_b) = setup_liquidity();
+    let client = LiquidityContractClient::new(&env, &contract_id);
+
+    // Existing behavior preserved: get_pool() still panics, callers that want
+    // a non-panicking check should use get_pool_safe() instead.
+    client.get_pool(&0, &1);
+}
